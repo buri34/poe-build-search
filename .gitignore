@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
+.env
+.playwright/
+data/cache/
+data/*.db-shm
+data/*.db-wal
+=1.30.0

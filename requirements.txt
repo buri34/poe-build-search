@@ -1,0 +1,2 @@
+streamlit>=1.30.0
+pydantic-settings>=2.3.0
