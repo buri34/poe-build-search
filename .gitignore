@@ -9,4 +9,4 @@ venv/
 data/cache/
 data/*.db-shm
 data/*.db-wal
-=1.30.0
+secrets.toml
