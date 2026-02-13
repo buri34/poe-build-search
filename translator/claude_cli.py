@@ -284,55 +284,6 @@ class ClaudeTranslator:
         finally:
             await db.close()
 
-    async def translate_reddit_ratings(self) -> None:
-        """Reddit評価のsummary_enを翻訳してsummary_jaに保存"""
-        db = await get_db()
-        try:
-            cursor = await db.execute(
-                "SELECT id, summary_en FROM reddit_ratings WHERE summary_ja IS NULL AND summary_en IS NOT NULL"
-            )
-            rows = await cursor.fetchall()
-
-            if not rows:
-                print("✅ 未翻訳のReddit評価はありません")
-                return
-
-            print(f"📊 未翻訳Reddit評価数: {len(rows)}")
-            print()
-
-            success_count = 0
-            fail_count = 0
-
-            for i, row in enumerate(rows, start=1):
-                try:
-                    print(f"[{i}/{len(rows)}] 🔄 翻訳中: reddit_ratings ID {row['id']}")
-                    summary_ja = self.translate_text(
-                        row["summary_en"],
-                        "Redditコミュニティのビルド評価サマリー"
-                    )
-
-                    await db.execute(
-                        "UPDATE reddit_ratings SET summary_ja = ? WHERE id = ?",
-                        (summary_ja, row["id"])
-                    )
-                    await db.commit()
-                    print(f"✅ 完了: {summary_ja}")
-                    success_count += 1
-
-                except Exception as e:
-                    print(f"❌ 翻訳失敗: reddit_ratings ID {row['id']} - {e}")
-                    fail_count += 1
-
-                print()
-
-            print("=" * 60)
-            print(f"✅ 翻訳完了: {success_count} 件")
-            print(f"❌ 翻訳失敗: {fail_count} 件")
-            print("=" * 60)
-
-        finally:
-            await db.close()
-
 
 async def main():
     """メイン実行"""
@@ -343,7 +294,6 @@ async def main():
     parser.add_argument("--all", action="store_true", help="全未翻訳ビルドを翻訳")
     parser.add_argument("--build-id", type=int, help="特定IDのビルドを翻訳")
     parser.add_argument("--reset", action="store_true", help="全ビルドのtranslation_statusをpendingにリセット")
-    parser.add_argument("--reddit", action="store_true", help="Reddit評価のsummary_enを日本語に翻訳")
 
     args = parser.parse_args()
 
@@ -386,10 +336,6 @@ async def main():
     elif args.build_id:
         # 特定IDのビルドを翻訳
         await translator.translate_build(args.build_id)
-
-    elif args.reddit:
-        # Reddit評価を翻訳
-        await translator.translate_reddit_ratings()
 
     else:
         parser.print_help()

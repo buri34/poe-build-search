@@ -97,24 +97,6 @@ CREATE INDEX IF NOT EXISTS idx_builds_ascendancy ON builds(ascendancy_en);
 CREATE INDEX IF NOT EXISTS idx_builds_translation ON builds(translation_status);
 CREATE INDEX IF NOT EXISTS idx_builds_favorites ON builds(favorites DESC);
 
--- Reddit評価テーブル
-CREATE TABLE IF NOT EXISTS reddit_ratings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    build_id INTEGER,                    -- buildsテーブルのid（マッチした場合）
-    build_name_matched TEXT NOT NULL,     -- マッチしたビルド名
-    score INTEGER DEFAULT 0,             -- upvote合算スコア
-    weighted_score REAL DEFAULT 0,       -- score × upvote_ratio 合算
-    mention_count INTEGER DEFAULT 0,     -- 言及投稿数
-    comment_count INTEGER DEFAULT 0,     -- 議論活発度（num_comments合算）
-    sentiment TEXT DEFAULT 'positive',   -- positive のみ保存
-    summary_en TEXT,                     -- 評価サマリー（英語）
-    summary_ja TEXT,                     -- 評価サマリー（日本語、翻訳後）
-    source_urls TEXT,                    -- 言及投稿URL（JSON配列）
-    updated_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (build_id) REFERENCES builds(id)
-);
-CREATE INDEX IF NOT EXISTS idx_reddit_build ON reddit_ratings(build_id);
-
 -- PoE用語辞書テーブル
 CREATE TABLE IF NOT EXISTS terms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
