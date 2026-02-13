@@ -104,6 +104,8 @@ def search_builds(
     combat_style_filter: Optional[str] = None,
     specialty_filters: Optional[list[str]] = None,
     patch_327_only: bool = False,
+    reddit_only: bool = False,
+    sort_by: str = "favorites",
 ) -> list[sqlite3.Row]:
     """ビルド検索（全文検索 + フィルタ）"""
     conn = get_db_connection()
@@ -111,16 +113,46 @@ def search_builds(
         return []
 
     try:
+        # reddit_ratingsテーブルの存在チェック
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='reddit_ratings'"
+        )
+        has_reddit_table = cursor.fetchone() is not None
+
         # ベースクエリ
         if keyword:
             # FTS5全文検索
-            query = """
-                SELECT * FROM builds
-                WHERE id IN (SELECT rowid FROM builds_fts WHERE builds_fts MATCH ?)
-            """
+            if has_reddit_table:
+                query = """
+                    SELECT builds.*,
+                           reddit_ratings.weighted_score,
+                           reddit_ratings.mention_count,
+                           reddit_ratings.comment_count,
+                           reddit_ratings.summary_ja
+                    FROM builds
+                    LEFT JOIN reddit_ratings ON builds.id = reddit_ratings.build_id
+                    WHERE builds.id IN (SELECT rowid FROM builds_fts WHERE builds_fts MATCH ?)
+                """
+            else:
+                query = """
+                    SELECT * FROM builds
+                    WHERE id IN (SELECT rowid FROM builds_fts WHERE builds_fts MATCH ?)
+                """
             params = [keyword]
         else:
-            query = "SELECT * FROM builds WHERE 1=1"
+            if has_reddit_table:
+                query = """
+                    SELECT builds.*,
+                           reddit_ratings.weighted_score,
+                           reddit_ratings.mention_count,
+                           reddit_ratings.comment_count,
+                           reddit_ratings.summary_ja
+                    FROM builds
+                    LEFT JOIN reddit_ratings ON builds.id = reddit_ratings.build_id
+                    WHERE 1=1
+                """
+            else:
+                query = "SELECT * FROM builds WHERE 1=1"
             params = []
 
         # フィルタ条件追加
@@ -155,8 +187,15 @@ def search_builds(
         if patch_327_only:
             query += " AND patch = '3.27'"
 
-        # ソート（お気に入り数順）
-        query += " ORDER BY favorites DESC LIMIT 100"
+        # Reddit評価ありフィルタ
+        if reddit_only and has_reddit_table:
+            query += " AND reddit_ratings.weighted_score IS NOT NULL"
+
+        # ソート
+        if sort_by == "reddit" and has_reddit_table:
+            query += " ORDER BY reddit_ratings.weighted_score DESC NULLS LAST, builds.favorites DESC LIMIT 100"
+        else:
+            query += " ORDER BY builds.favorites DESC LIMIT 100"
 
         cursor = conn.execute(query, params)
         return cursor.fetchall()
@@ -165,12 +204,34 @@ def search_builds(
 
 
 def get_build_by_id(build_id: int) -> Optional[sqlite3.Row]:
-    """ビルドIDで取得"""
+    """ビルドIDで取得（Reddit評価含む）"""
     conn = get_db_connection()
     if conn is None:
         return None
     try:
-        cursor = conn.execute("SELECT * FROM builds WHERE id = ?", (build_id,))
+        # reddit_ratingsテーブルの存在チェック
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='reddit_ratings'"
+        )
+        has_reddit_table = cursor.fetchone() is not None
+
+        if has_reddit_table:
+            query = """
+                SELECT builds.*,
+                       reddit_ratings.weighted_score,
+                       reddit_ratings.mention_count,
+                       reddit_ratings.comment_count,
+                       reddit_ratings.summary_ja,
+                       reddit_ratings.summary_en,
+                       reddit_ratings.source_urls
+                FROM builds
+                LEFT JOIN reddit_ratings ON builds.id = reddit_ratings.build_id
+                WHERE builds.id = ?
+            """
+        else:
+            query = "SELECT * FROM builds WHERE id = ?"
+
+        cursor = conn.execute(query, (build_id,))
         return cursor.fetchone()
     finally:
         conn.close()
@@ -312,6 +373,19 @@ def render_sidebar():
     # 3.27のビルドのみ表示
     patch_327_only = st.sidebar.checkbox("3.27のビルドのみ表示", value=False)
 
+    # ========== Reddit評価フィルタ ==========
+    st.sidebar.divider()
+    st.sidebar.subheader("🔥 Reddit評価")
+    reddit_only = st.sidebar.checkbox("Reddit評価ありのみ", value=False)
+
+    # ソート切替
+    sort_by = st.sidebar.radio(
+        "ソート順",
+        ["favorites", "reddit"],
+        format_func=lambda x: "お気に入り順" if x == "favorites" else "Reddit評価順",
+        index=0
+    )
+
     return (
         class_filter,
         ascendancy_filter,
@@ -320,6 +394,8 @@ def render_sidebar():
         combat_style_filter,
         specialty_filters,
         patch_327_only,
+        reddit_only,
+        sort_by,
     )
 
 
@@ -351,6 +427,8 @@ def render_list_view():
         combat_style_filter,
         specialty_filters,
         patch_327_only,
+        reddit_only,
+        sort_by,
     ) = render_sidebar()
 
     # 検索実行
@@ -363,6 +441,8 @@ def render_list_view():
         combat_style_filter,
         specialty_filters,
         patch_327_only,
+        reddit_only,
+        sort_by,
     )
 
     if not builds:
@@ -407,6 +487,23 @@ def render_list_view():
                         specialty_ja = SPECIALTY_JA.get(first_specialty, first_specialty)
                         badges.append(f"🎯 {specialty_ja}")
                 except (KeyError, IndexError):
+                    pass
+
+                # Reddit評価バッジ
+                try:
+                    if build["weighted_score"] is not None:
+                        score = build["weighted_score"]
+                        mention = build["mention_count"]
+                        # スコアで色分け
+                        if score >= 80:
+                            color = "#ff4444"  # 赤（高評価）
+                        elif score >= 50:
+                            color = "#ff8800"  # オレンジ（中評価）
+                        else:
+                            color = "#888888"  # グレー（低評価）
+                        reddit_badge = f'<span style="color:{color}">🔥 Reddit: {score:.0f}点 ({mention}件)</span>'
+                        st.markdown(reddit_badge, unsafe_allow_html=True)
+                except (KeyError, TypeError):
                     pass
 
                 st.caption(" | ".join(badges))
@@ -513,6 +610,44 @@ def render_detail_view():
         st.write(description)
     else:
         st.caption("説明なし")
+
+    # ========== Reddit コミュニティ評価 ==========
+    try:
+        if build["weighted_score"] is not None:
+            st.divider()
+            st.subheader("📊 Reddit コミュニティ評価")
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                score = build["weighted_score"]
+                st.metric("信頼度付きスコア", f"{score:.1f}点")
+            with col2:
+                mention = build["mention_count"] or 0
+                st.metric("言及投稿数", f"{mention}件")
+            with col3:
+                comments = build["comment_count"] or 0
+                st.metric("議論活発度", f"{comments}コメント")
+
+            # サマリー表示（翻訳済み優先）
+            summary = build.get("summary_ja") or build.get("summary_en")
+            if summary:
+                st.write("**評価サマリー:**")
+                st.write(summary)
+
+            # 元投稿へのリンク
+            source_urls = build.get("source_urls")
+            if source_urls:
+                try:
+                    urls = json.loads(source_urls)
+                    if urls:
+                        st.write("**元の投稿:**")
+                        for i, url in enumerate(urls[:5], 1):  # 最大5件まで表示
+                            st.markdown(f"- [Reddit投稿 #{i}]({url})")
+                except json.JSONDecodeError:
+                    pass
+    except (KeyError, TypeError):
+        # Reddit評価データがない場合はスキップ
+        pass
 
     # その他情報
     with st.expander("📊 詳細情報"):
