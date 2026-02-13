@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS builds (
     cost_tier TEXT,
     damage_types TEXT,              -- JSON配列
 
+    -- 詳細情報
+    combat_style TEXT,             -- 戦闘スタイル: melee/ranged/caster/summoner/hybrid
+    specialty TEXT,                 -- 得意分野 JSON配列: ["league_starter","boss_killer","map_farmer"]等
+    pros_cons_en TEXT,              -- 長所短所(英語)
+    pros_cons_ja TEXT,              -- 長所短所(日本語)
+    core_equipment_en TEXT,         -- コア装備・ジュエル(英語)
+    core_equipment_ja TEXT,         -- コア装備・ジュエル(日本語)
+
     -- 管理
     translation_status TEXT DEFAULT 'pending' CHECK(translation_status IN ('pending', 'completed', 'failed')),
     scraped_at TEXT DEFAULT (datetime('now')),
@@ -53,6 +61,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS builds_fts USING fts5(
     ascendancy_ja,
     skills_ja,
     description_ja,
+    pros_cons_ja,
+    core_equipment_ja,
     name_en,
     class_en,
     ascendancy_en,
@@ -64,20 +74,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS builds_fts USING fts5(
 
 -- FTS同期トリガー
 CREATE TRIGGER IF NOT EXISTS builds_ai AFTER INSERT ON builds BEGIN
-    INSERT INTO builds_fts(rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, name_en, class_en, ascendancy_en, skills_en)
-    VALUES (new.id, new.name_ja, new.class_ja, new.ascendancy_ja, new.skills_ja, new.description_ja, new.name_en, new.class_en, new.ascendancy_en, new.skills_en);
+    INSERT INTO builds_fts(rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, pros_cons_ja, core_equipment_ja, name_en, class_en, ascendancy_en, skills_en)
+    VALUES (new.id, new.name_ja, new.class_ja, new.ascendancy_ja, new.skills_ja, new.description_ja, new.pros_cons_ja, new.core_equipment_ja, new.name_en, new.class_en, new.ascendancy_en, new.skills_en);
 END;
 
 CREATE TRIGGER IF NOT EXISTS builds_ad AFTER DELETE ON builds BEGIN
-    INSERT INTO builds_fts(builds_fts, rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, name_en, class_en, ascendancy_en, skills_en)
-    VALUES ('delete', old.id, old.name_ja, old.class_ja, old.ascendancy_ja, old.skills_ja, old.description_ja, old.name_en, old.class_en, old.ascendancy_en, old.skills_en);
+    INSERT INTO builds_fts(builds_fts, rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, pros_cons_ja, core_equipment_ja, name_en, class_en, ascendancy_en, skills_en)
+    VALUES ('delete', old.id, old.name_ja, old.class_ja, old.ascendancy_ja, old.skills_ja, old.description_ja, old.pros_cons_ja, old.core_equipment_ja, old.name_en, old.class_en, old.ascendancy_en, old.skills_en);
 END;
 
 CREATE TRIGGER IF NOT EXISTS builds_au AFTER UPDATE ON builds BEGIN
-    INSERT INTO builds_fts(builds_fts, rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, name_en, class_en, ascendancy_en, skills_en)
-    VALUES ('delete', old.id, old.name_ja, old.class_ja, old.ascendancy_ja, old.skills_ja, old.description_ja, old.name_en, old.class_en, old.ascendancy_en, old.skills_en);
-    INSERT INTO builds_fts(rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, name_en, class_en, ascendancy_en, skills_en)
-    VALUES (new.id, new.name_ja, new.class_ja, new.ascendancy_ja, new.skills_ja, new.description_ja, new.name_en, new.class_en, new.ascendancy_en, new.skills_en);
+    INSERT INTO builds_fts(builds_fts, rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, pros_cons_ja, core_equipment_ja, name_en, class_en, ascendancy_en, skills_en)
+    VALUES ('delete', old.id, old.name_ja, old.class_ja, old.ascendancy_ja, old.skills_ja, old.description_ja, old.pros_cons_ja, old.core_equipment_ja, old.name_en, old.class_en, old.ascendancy_en, old.skills_en);
+    INSERT INTO builds_fts(rowid, name_ja, class_ja, ascendancy_ja, skills_ja, description_ja, pros_cons_ja, core_equipment_ja, name_en, class_en, ascendancy_en, skills_en)
+    VALUES (new.id, new.name_ja, new.class_ja, new.ascendancy_ja, new.skills_ja, new.description_ja, new.pros_cons_ja, new.core_equipment_ja, new.name_en, new.class_en, new.ascendancy_en, new.skills_en);
 END;
 
 -- インデックス

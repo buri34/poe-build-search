@@ -1,13 +1,19 @@
-"""mobalytics.gg スクレイパー: GraphQL API傍受方式"""
+"""mobalytics.gg スクレイパー: GraphQL API傍受方式 + 詳細ページ抽出"""
 import json
+import re
 import asyncio
 from playwright.async_api import async_playwright, Page, Route
 
-from scraper.base import random_delay, save_cache, load_cache, save_builds_to_db
+from scraper.base import (
+    random_delay, save_cache, load_cache, save_builds_to_db,
+    detect_combat_style, detect_specialty,
+)
 
 BASE_URL = "https://mobalytics.gg/poe/builds"
 # ビルドカテゴリタブ
 TABS = ["verified", "creator", "community"]
+# 対象パッチバージョン
+ALLOWED_PATCHES = {"3.27", "3.26"}
 
 
 def _normalize_build(raw: dict, tab: str) -> dict | None:
@@ -15,6 +21,16 @@ def _normalize_build(raw: dict, tab: str) -> dict | None:
     try:
         name = raw.get("name") or raw.get("title") or ""
         if not name:
+            return None
+
+        # パッチバージョンフィルタ
+        patch = raw.get("patchVersion") or raw.get("patch") or ""
+        patch_short = ""
+        if patch:
+            m = re.match(r"(\d+\.\d+)", str(patch))
+            if m:
+                patch_short = m.group(1)
+        if patch_short not in ALLOWED_PATCHES:
             return None
 
         class_name = raw.get("className") or raw.get("class") or ""
@@ -46,6 +62,11 @@ def _normalize_build(raw: dict, tab: str) -> dict | None:
 
         slug = raw.get("slug") or raw.get("id") or name.lower().replace(" ", "-")
         source_id = str(raw.get("id") or slug)
+        description = raw.get("description") or raw.get("summary") or ""
+
+        # 戦闘スタイル・得意分野を判定
+        combat_style = detect_combat_style(name, skills, description)
+        specialty = detect_specialty(build_types, description)
 
         return {
             "source": "mobalytics",
@@ -55,8 +76,8 @@ def _normalize_build(raw: dict, tab: str) -> dict | None:
             "class_en": class_name,
             "ascendancy_en": ascendancy,
             "skills_en": json.dumps(skills) if skills else None,
-            "description_en": raw.get("description") or raw.get("summary"),
-            "patch": raw.get("patchVersion") or raw.get("patch"),
+            "description_en": description,
+            "patch": str(patch),
             "build_types": json.dumps(build_types) if build_types else None,
             "author": (raw.get("author") or {}).get("name") if isinstance(raw.get("author"), dict) else raw.get("authorName"),
             "favorites": raw.get("likesCount") or raw.get("favorites") or 0,
@@ -67,9 +88,187 @@ def _normalize_build(raw: dict, tab: str) -> dict | None:
             "activities": None,
             "cost_tier": None,
             "damage_types": None,
+            "combat_style": combat_style,
+            "specialty": json.dumps(specialty),
+            "pros_cons_en": None,  # 詳細ページから後で取得
+            "pros_cons_ja": None,
+            "core_equipment_en": None,  # 詳細ページから後で取得
+            "core_equipment_ja": None,
         }
     except Exception as e:
         print(f"  正規化エラー: {e}")
+        return None
+
+
+async def _scrape_detail_page(page: Page, build: dict) -> dict:
+    """ビルド詳細ページからPros/Cons, コア装備を抽出"""
+    url = build["source_url"]
+    print(f"    詳細ページ: {url}")
+    try:
+        await page.goto(url, timeout=60000)
+        await page.wait_for_timeout(3000)
+
+        page_text = await page.text_content("body") or ""
+
+        # Strengths and Weaknesses セクションを抽出
+        pros_cons = await _extract_pros_cons(page, page_text)
+        if pros_cons:
+            build["pros_cons_en"] = pros_cons
+
+        # コア装備を抽出
+        core_equipment = await _extract_core_equipment(page, page_text)
+        if core_equipment:
+            build["core_equipment_en"] = core_equipment
+
+        # description_enを強化（概要テキストを取得）
+        overview = await _extract_overview(page, page_text)
+        if overview and (not build["description_en"] or len(build["description_en"]) < len(overview)):
+            build["description_en"] = overview
+
+        # 戦闘スタイルをページ内容で再判定（より正確に）
+        skills_raw = json.loads(build["skills_en"]) if build["skills_en"] else []
+        build["combat_style"] = detect_combat_style(
+            build["name_en"], skills_raw, page_text[:2000]
+        )
+
+    except Exception as e:
+        print(f"    詳細ページエラー({url}): {e}")
+
+    return build
+
+
+async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
+    """Strengths/Weaknesses セクションを抽出"""
+    try:
+        # "Strengths" と "Weaknesses" を含むセクションを探す
+        result_parts = []
+
+        # DOMから直接抽出を試みる
+        strengths_section = page.locator('text=Strengths').first
+        if await strengths_section.count() > 0:
+            # 親コンテナを取得してテキスト抽出
+            parent = strengths_section.locator("xpath=ancestor::div[contains(@class,'section') or contains(@class,'card') or contains(@class,'block')]").first
+            if await parent.count() > 0:
+                text = await parent.text_content() or ""
+                if text and len(text) > 10:
+                    result_parts.append(text.strip()[:1000])
+
+        # DOMから取れなかった場合、テキストパースにフォールバック
+        if not result_parts:
+            # "Strengths" と "Weaknesses" をテキストから抽出
+            text_lower = page_text.lower()
+            for keyword in ["strengths", "pros"]:
+                idx = text_lower.find(keyword)
+                if idx >= 0:
+                    snippet = page_text[idx:idx+500]
+                    # 次のセクション区切りまで
+                    for delimiter in ["\n\n", "Weaknesses", "Equipment", "Passive", "Skills"]:
+                        end = snippet.find(delimiter, len(keyword))
+                        if end > 0:
+                            snippet = snippet[:end]
+                            break
+                    result_parts.append(f"Strengths: {snippet.strip()}")
+                    break
+
+            for keyword in ["weaknesses", "cons"]:
+                idx = text_lower.find(keyword)
+                if idx >= 0:
+                    snippet = page_text[idx:idx+500]
+                    for delimiter in ["\n\n", "Equipment", "Passive", "Skills", "How it"]:
+                        end = snippet.find(delimiter, len(keyword))
+                        if end > 0:
+                            snippet = snippet[:end]
+                            break
+                    result_parts.append(f"Weaknesses: {snippet.strip()}")
+                    break
+
+        return "\n".join(result_parts) if result_parts else None
+    except Exception:
+        return None
+
+
+async def _extract_core_equipment(page: Page, page_text: str) -> str | None:
+    """コア装備・ジュエルリストを抽出"""
+    try:
+        equipment_items = []
+
+        # Equipmentセクションのアイテム名を抽出
+        equipment_section = page.locator('text=Equipment').first
+        if await equipment_section.count() > 0:
+            parent = equipment_section.locator("xpath=ancestor::section | ancestor::div[contains(@class,'section')]").first
+            if await parent.count() > 0:
+                # アイテム名リンクを取得
+                items = parent.locator('a[href*="/poe/item"], a[href*="/poe/unique"]')
+                count = await items.count()
+                for i in range(min(count, 20)):
+                    text = await items.nth(i).text_content()
+                    if text and text.strip():
+                        equipment_items.append(text.strip())
+
+        # ジュエルセクションも探す
+        jewel_section = page.locator('text=Jewels').first
+        if await jewel_section.count() > 0:
+            parent = jewel_section.locator("xpath=ancestor::section | ancestor::div[contains(@class,'section')]").first
+            if await parent.count() > 0:
+                items = parent.locator('a[href*="/poe/item"], a[href*="/poe/unique"], a[href*="/poe/jewel"]')
+                count = await items.count()
+                for i in range(min(count, 10)):
+                    text = await items.nth(i).text_content()
+                    if text and text.strip():
+                        equipment_items.append(text.strip())
+
+        # フォールバック: テキストからユニーク装備名を推定
+        if not equipment_items:
+            # PoE2の代表的なユニーク装備名パターンを探す
+            text_lower = page_text.lower()
+            equip_idx = text_lower.find("equipment")
+            if equip_idx >= 0:
+                snippet = page_text[equip_idx:equip_idx+2000]
+                # テキスト内のアイテム名を行単位で抽出
+                lines = snippet.split('\n')
+                for line in lines[1:30]:
+                    line = line.strip()
+                    if line and 3 < len(line) < 60 and not line.startswith(('Equipment', 'Slot', 'Type')):
+                        equipment_items.append(line)
+
+        # 重複排除
+        seen = set()
+        unique_items = []
+        for item in equipment_items:
+            if item not in seen:
+                seen.add(item)
+                unique_items.append(item)
+
+        return ", ".join(unique_items) if unique_items else None
+    except Exception:
+        return None
+
+
+async def _extract_overview(page: Page, page_text: str) -> str | None:
+    """ビルド概要テキストを抽出"""
+    try:
+        # Build Overviewセクションを探す
+        overview_section = page.locator('text=Build Overview').first
+        if await overview_section.count() > 0:
+            # 次のセクションまでのテキストを取得
+            parent = overview_section.locator("xpath=ancestor::section | ancestor::div[contains(@class,'section') or contains(@class,'overview')]").first
+            if await parent.count() > 0:
+                text = await parent.text_content() or ""
+                # "Build Overview" の後のテキスト
+                idx = text.find("Build Overview")
+                if idx >= 0:
+                    text = text[idx + len("Build Overview"):].strip()
+                return text[:1500] if text else None
+
+        # フォールバック: ページ先頭の説明文
+        text_lower = page_text.lower()
+        overview_idx = text_lower.find("overview")
+        if overview_idx >= 0:
+            snippet = page_text[overview_idx:overview_idx+1500]
+            return snippet.strip() if snippet.strip() else None
+
+        return None
+    except Exception:
         return None
 
 
@@ -81,7 +280,6 @@ async def _intercept_graphql(page: Page, captured: list[dict]):
         try:
             body = await response.text()
             data = json.loads(body)
-            # GraphQLレスポンスからビルドリストを探索
             _extract_builds(data, captured)
         except Exception:
             pass
@@ -118,8 +316,8 @@ async def scrape_tab(page: Page, tab: str) -> list[dict]:
 
     url = f"{BASE_URL}?buildTab={tab}"
     print(f"  [{tab}] アクセス中: {url}")
-    await page.goto(url, timeout=60000)  # wait_untilを指定しない（デフォルト動作）
-    await page.wait_for_timeout(5000)  # JavaScript実行完了を待つ
+    await page.goto(url, timeout=60000)
+    await page.wait_for_timeout(5000)
 
     # 「Show more」ボタンをクリックしてビルドを追加読み込み
     show_more_clicks = 0
@@ -145,7 +343,7 @@ async def scrape_tab(page: Page, tab: str) -> list[dict]:
         print(f"  [{tab}] DOMパース失敗。Apollo State にフォールバック")
         captured_raw = await _parse_apollo_state(page)
 
-    # 正規化
+    # 正規化（パッチフィルタ込み）
     builds = []
     seen_ids = set()
     for raw in captured_raw:
@@ -154,7 +352,7 @@ async def scrape_tab(page: Page, tab: str) -> list[dict]:
             seen_ids.add(b["source_id"])
             builds.append(b)
 
-    print(f"  [{tab}] 取得: {len(builds)}件")
+    print(f"  [{tab}] 取得（3.27/3.26のみ）: {len(builds)}件")
     return builds
 
 
@@ -168,34 +366,27 @@ async def _parse_dom_builds(page: Page) -> list[dict]:
     for i in range(count):
         card = cards.nth(i)
         try:
-            # ビルドへのリンクを取得
             link_el = card.locator('a[href*="/poe/builds/"]').first
             href = await link_el.get_attribute("href") if await link_el.count() > 0 else ""
 
-            # ビルド名: タイトル部分のみを抽出（"By" より前）
             card_text_full = await card.text_content() or ""
             lines = [l.strip() for l in card_text_full.split('\n') if l.strip()]
-            name = lines[0] if lines else ""  # 最初の行がタイトル
+            name = lines[0] if lines else ""
             if "By " in name:
                 name = name.split("By ")[0].strip()
 
-            # 作者名（プロフィールリンクから）
             author_el = card.locator('a[href*="/poe/profile/"]').first
             author = await author_el.text_content() if await author_el.count() > 0 else ""
 
-            # パッチバージョン（"3.27" のような形式）
             patch = ""
-            import re
             patch_match = re.search(r'3\.\d+', card_text_full)
             if patch_match:
                 patch = patch_match.group(0)
 
-            # 背景画像からクラス/アセンダンシー情報を推測
             img_style = await card.locator('div[style*="background"]').first.get_attribute("style") if await card.locator('div[style*="background"]').count() > 0 else ""
             class_hint = ""
             ascendancy_hint = ""
             if img_style:
-                # duelist-slayer.jpg → class=duelist, ascendancy=slayer
                 if "duelist" in img_style.lower():
                     class_hint = "Duelist"
                     if "slayer" in img_style.lower():
@@ -204,7 +395,6 @@ async def _parse_dom_builds(page: Page) -> list[dict]:
                         ascendancy_hint = "Gladiator"
                     elif "champion" in img_style.lower():
                         ascendancy_hint = "Champion"
-                # 他のクラスも同様に推測可能だが、今は簡易実装
 
             if name and href:
                 builds.append({
@@ -242,14 +432,14 @@ async def _parse_apollo_state(page: Page) -> list[dict]:
 
 
 async def scrape_mobalytics(use_cache: bool = True) -> list[dict]:
-    """mobalytics.gg から全ビルドをスクレイピング"""
+    """mobalytics.gg から全ビルドをスクレイピング（3.27/3.26のみ）"""
     if use_cache:
         cached = load_cache("mobalytics")
         if cached:
             print(f"mobalytics: キャッシュ使用 ({cached['count']}件, {cached['scraped_at']})")
             return cached["builds"]
 
-    print("mobalytics.gg スクレイピング開始")
+    print("mobalytics.gg スクレイピング開始（パッチ3.27/3.26のみ）")
     all_builds: list[dict] = []
     seen_ids: set[str] = set()
 
@@ -261,6 +451,7 @@ async def scrape_mobalytics(use_cache: bool = True) -> list[dict]:
         )
         page = await context.new_page()
 
+        # Phase 1: 一覧からビルド取得（パッチフィルタ済み）
         for tab in TABS:
             try:
                 builds = await scrape_tab(page, tab)
@@ -272,8 +463,18 @@ async def scrape_mobalytics(use_cache: bool = True) -> list[dict]:
             except Exception as e:
                 print(f"  [{tab}] エラー: {e}")
 
+        # Phase 2: 各ビルドの詳細ページにアクセスして追加情報を抽出
+        print(f"\n詳細ページアクセス開始（{len(all_builds)}件）")
+        for i, build in enumerate(all_builds):
+            try:
+                print(f"  [{i+1}/{len(all_builds)}] {build['name_en']}")
+                all_builds[i] = await _scrape_detail_page(page, build)
+                await random_delay(2, 4)
+            except Exception as e:
+                print(f"  詳細ページスキップ: {e}")
+
         await browser.close()
 
-    print(f"mobalytics: 合計 {len(all_builds)}件取得")
+    print(f"\nmobalytics: 合計 {len(all_builds)}件取得（3.27/3.26のみ）")
     save_cache("mobalytics", all_builds)
     return all_builds

@@ -6,8 +6,10 @@ PoE ビルド情報を Claude Code CLI 経由で翻訳する。
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -95,13 +97,18 @@ class ClaudeTranslator:
 
         for attempt in range(1, self.max_retries + 1):
             try:
+                # CLAUDE関連の環境変数を除外した環境を作成
+                clean_env = {k: v for k, v in os.environ.items()
+                             if not k.startswith('CLAUDE')}
+
                 result = subprocess.run(
-                    ["claude", "-p", prompt, "--output-format", "text"],
+                    ["claude", "-p", prompt, "--output-format", "text", "--model", "sonnet"],
                     input="",
                     capture_output=True,
                     text=True,
                     timeout=self.timeout_seconds,
                     check=True,
+                    env=clean_env,
                 )
                 translated = result.stdout.strip()
                 if translated:
@@ -126,7 +133,7 @@ class ClaudeTranslator:
 
             # リトライ前に少し待つ
             if attempt < self.max_retries:
-                asyncio.run(asyncio.sleep(2))
+                time.sleep(2)
 
         raise RuntimeError("Translation failed (should not reach here)")
 
@@ -144,7 +151,8 @@ class ClaudeTranslator:
             # ビルドを取得
             cursor = await db.execute(
                 """
-                SELECT id, name_en, class_en, ascendancy_en, skills_en, description_en
+                SELECT id, name_en, class_en, ascendancy_en, skills_en, description_en,
+                       pros_cons_en, core_equipment_en
                 FROM builds
                 WHERE id = ?
                 """,
@@ -182,11 +190,20 @@ class ClaudeTranslator:
             if row["description_en"]:
                 description_ja = self.translate_text(row["description_en"], "ビルド説明文")
 
+            pros_cons_ja = None
+            if row["pros_cons_en"]:
+                pros_cons_ja = self.translate_text(row["pros_cons_en"], "ビルドの長所と短所(Pros/Cons)")
+
+            core_equipment_ja = None
+            if row["core_equipment_en"]:
+                core_equipment_ja = self.translate_text(row["core_equipment_en"], "ビルドのコア装備・ジュエル")
+
             # DBに保存
             await db.execute(
                 """
                 UPDATE builds
                 SET name_ja = ?, class_ja = ?, ascendancy_ja = ?, skills_ja = ?, description_ja = ?,
+                    pros_cons_ja = ?, core_equipment_ja = ?,
                     translation_status = 'completed', translated_at = ?
                 WHERE id = ?
                 """,
@@ -196,6 +213,8 @@ class ClaudeTranslator:
                     ascendancy_ja,
                     skills_ja,
                     description_ja,
+                    pros_cons_ja,
+                    core_equipment_ja,
                     datetime.now().isoformat(),
                     build_id,
                 ),
@@ -274,8 +293,21 @@ async def main():
     parser.add_argument("--test", action="store_true", help="未翻訳ビルドを1件だけ翻訳（テストモード）")
     parser.add_argument("--all", action="store_true", help="全未翻訳ビルドを翻訳")
     parser.add_argument("--build-id", type=int, help="特定IDのビルドを翻訳")
+    parser.add_argument("--reset", action="store_true", help="全ビルドのtranslation_statusをpendingにリセット")
 
     args = parser.parse_args()
+
+    if args.reset:
+        # 全ビルドの翻訳ステータスをリセット
+        db = await get_db()
+        try:
+            cursor = await db.execute("UPDATE builds SET translation_status = 'pending', translated_at = NULL")
+            await db.commit()
+            affected = cursor.rowcount
+            print(f"✅ {affected} 件のビルドをリセットしました")
+        finally:
+            await db.close()
+        return
 
     translator = ClaudeTranslator()
     print("📖 用語辞書を読み込み中...")

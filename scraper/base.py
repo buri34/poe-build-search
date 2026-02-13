@@ -1,4 +1,4 @@
-"""スクレイパー共通機能: ディレイ、キャッシュ、リトライ"""
+"""スクレイパー共通機能: ディレイ、キャッシュ、リトライ、戦闘スタイル/得意分野判定"""
 import json
 import random
 import asyncio
@@ -6,6 +6,73 @@ from pathlib import Path
 from datetime import datetime
 
 from app.config import settings
+
+# 戦闘スタイル判定用キーワード
+MELEE_KEYWORDS = [
+    "cyclone", "strike", "slam", "melee", "cleave", "lacerate", "reave",
+    "blade flurry", "double strike", "molten strike", "ground slam",
+    "earthquake", "tectonic", "boneshatter", "sunder", "heavy strike",
+    "viper strike", "spectral throw", "blade vortex", "whirlwind",
+    "general's cry", "rage vortex", "perforate", "smite",
+]
+RANGED_KEYWORDS = [
+    "bow", "arrow", "shot", "barrage", "rain of arrows", "tornado shot",
+    "lightning arrow", "ice shot", "split arrow", "blast rain", "ballista",
+    "shrapnel", "galvanic", "kinetic bolt", "kinetic blast", "kinetic fusillade",
+    "wand", "power siphon",
+]
+CASTER_KEYWORDS = [
+    "spell", "cast", "arc", "fireball", "spark", "ice nova", "freezing pulse",
+    "storm call", "orb of storms", "firestorm", "ball lightning", "lightning warp",
+    "flame surge", "magma orb", "glacial cascade", "volatile dead", "detonate dead",
+    "essence drain", "contagion", "bane", "soulrend", "dark pact", "forbidden rite",
+    "cremation", "wave of conviction", "divine ire", "storm brand", "armageddon brand",
+    "winter orb", "righteous fire", "wintertide brand",
+]
+SUMMONER_KEYWORDS = [
+    "summon", "minion", "zombie", "skeleton", "spectre", "golem", "animate",
+    "raise", "srs", "phantasm", "carrion", "herald of purity", "dominating blow",
+    "absolution",
+]
+
+
+def detect_combat_style(name: str, skills: list[str], description: str) -> str:
+    """ビルド名・スキル・説明文から戦闘スタイルを判定"""
+    text = f"{name} {' '.join(skills)} {description}".lower()
+    scores = {
+        "melee": sum(1 for kw in MELEE_KEYWORDS if kw in text),
+        "ranged": sum(1 for kw in RANGED_KEYWORDS if kw in text),
+        "caster": sum(1 for kw in CASTER_KEYWORDS if kw in text),
+        "summoner": sum(1 for kw in SUMMONER_KEYWORDS if kw in text),
+    }
+    max_score = max(scores.values())
+    if max_score == 0:
+        return "hybrid"
+    top = [k for k, v in scores.items() if v == max_score]
+    if len(top) > 1:
+        return "hybrid"
+    return top[0]
+
+
+def detect_specialty(build_types: list[str], description: str) -> list[str]:
+    """ビルドタグと説明文から得意分野を判定"""
+    specialties = []
+    text = f"{' '.join(build_types)} {description}".lower()
+
+    if any(kw in text for kw in ["starter", "league start", "league-start"]):
+        specialties.append("league_starter")
+    if any(kw in text for kw in ["boss", "bossing", "boss killer"]):
+        specialties.append("boss_killer")
+    if any(kw in text for kw in ["map", "mapping", "clear", "farmer", "farming"]):
+        specialties.append("map_farmer")
+    if any(kw in text for kw in ["all-around", "all around", "all rounder", "versatile"]):
+        specialties.append("all_rounder")
+    if any(kw in text for kw in ["speed", "fast", "zoom"]):
+        specialties.append("speed_farmer")
+    if any(kw in text for kw in ["tank", "tanky", "defensive", "survive"]):
+        specialties.append("tanky")
+
+    return specialties if specialties else ["all_rounder"]
 
 
 async def random_delay(min_sec: float = 2.0, max_sec: float = 5.0):
@@ -46,6 +113,8 @@ async def save_builds_to_db(builds: list[dict]):
                     patch, build_types, author,
                     favorites, verified, hc, ssf,
                     playstyle, activities, cost_tier, damage_types,
+                    combat_style, specialty, pros_cons_en, pros_cons_ja,
+                    core_equipment_en, core_equipment_ja,
                     translation_status, scraped_at
                 ) VALUES (
                     :source, :source_id, :source_url,
@@ -53,6 +122,8 @@ async def save_builds_to_db(builds: list[dict]):
                     :patch, :build_types, :author,
                     :favorites, :verified, :hc, :ssf,
                     :playstyle, :activities, :cost_tier, :damage_types,
+                    :combat_style, :specialty, :pros_cons_en, :pros_cons_ja,
+                    :core_equipment_en, :core_equipment_ja,
                     'pending', datetime('now')
                 )""",
                 b,

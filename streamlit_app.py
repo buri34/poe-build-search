@@ -59,12 +59,51 @@ def get_distinct_ascendancies(class_filter: Optional[str] = None) -> list[str]:
         conn.close()
 
 
+def get_distinct_combat_styles() -> list[str]:
+    """戦闘スタイル一覧を取得"""
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    try:
+        cursor = conn.execute(
+            "SELECT DISTINCT combat_style FROM builds WHERE combat_style IS NOT NULL ORDER BY combat_style"
+        )
+        return [row[0] for row in cursor.fetchall()]
+    except sqlite3.OperationalError:
+        # combat_styleカラムが存在しない場合
+        return []
+    finally:
+        conn.close()
+
+
+def get_distinct_specialties() -> list[str]:
+    """得意分野の一覧を取得（JSON配列から抽出）"""
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    try:
+        cursor = conn.execute("SELECT DISTINCT specialty FROM builds WHERE specialty IS NOT NULL")
+        specialty_set = set()
+        for row in cursor.fetchall():
+            specialties = parse_json_field(row[0])
+            specialty_set.update(specialties)
+        return sorted(list(specialty_set))
+    except sqlite3.OperationalError:
+        # specialtyカラムが存在しない場合
+        return []
+    finally:
+        conn.close()
+
+
 def search_builds(
     keyword: str = "",
     class_filter: Optional[str] = None,
     ascendancy_filter: Optional[str] = None,
     source_filter: Optional[str] = None,
     translated_only: bool = False,
+    combat_style_filter: Optional[str] = None,
+    specialty_filters: Optional[list[str]] = None,
+    patch_327_only: bool = False,
 ) -> list[sqlite3.Row]:
     """ビルド検索（全文検索 + フィルタ）"""
     conn = get_db_connection()
@@ -100,6 +139,22 @@ def search_builds(
         if translated_only:
             query += " AND translation_status = 'completed'"
 
+        # 新フィルタ
+        if combat_style_filter:
+            query += " AND combat_style = ?"
+            params.append(combat_style_filter)
+
+        if specialty_filters:
+            # 複数の得意分野フィルタ（OR条件）
+            specialty_conditions = []
+            for spec in specialty_filters:
+                specialty_conditions.append(f"specialty LIKE ?")
+                params.append(f'%"{spec}"%')
+            query += f" AND ({' OR '.join(specialty_conditions)})"
+
+        if patch_327_only:
+            query += " AND patch = '3.27'"
+
         # ソート（お気に入り数順）
         query += " ORDER BY favorites DESC LIMIT 100"
 
@@ -131,6 +186,23 @@ def count_builds() -> int:
         return cursor.fetchone()[0]
     finally:
         conn.close()
+
+
+# ========== マッピング辞書 ==========
+COMBAT_STYLE_JA = {
+    "melee": "近接",
+    "ranged": "遠距離",
+    "caster": "キャスター",
+    "summoner": "召喚",
+    "hybrid": "ハイブリッド",
+}
+
+SPECIALTY_JA = {
+    "league_starter": "リーグスターター",
+    "boss_killer": "対ボスDPS",
+    "map_farmer": "マップファーム",
+    "all_rounder": "オールラウンダー",
+}
 
 
 # ========== ユーティリティ関数 ==========
@@ -202,7 +274,53 @@ def render_sidebar():
     # 翻訳済みのみ
     translated_only = st.sidebar.checkbox("翻訳済みのみ表示", value=False)
 
-    return class_filter, ascendancy_filter, source_filter, translated_only
+    # ========== 新フィルタ ==========
+    st.sidebar.divider()
+    st.sidebar.subheader("⚔️ 戦闘スタイル・得意分野")
+
+    # 戦闘スタイル選択
+    combat_styles = get_distinct_combat_styles()
+    combat_style_options = ["全て"] + [COMBAT_STYLE_JA.get(cs, cs) for cs in combat_styles]
+    combat_style_ja = st.sidebar.selectbox(
+        "戦闘スタイル",
+        combat_style_options,
+        index=0
+    )
+    # 日本語→英語に逆変換
+    if combat_style_ja == "全て":
+        combat_style_filter = None
+    else:
+        combat_style_filter = next(
+            (en for en, ja in COMBAT_STYLE_JA.items() if ja == combat_style_ja),
+            combat_style_ja
+        )
+
+    # 得意分野選択（複数選択可）
+    specialties = get_distinct_specialties()
+    specialty_options_ja = [SPECIALTY_JA.get(sp, sp) for sp in specialties]
+    specialty_selected_ja = st.sidebar.multiselect(
+        "得意分野（複数選択可）",
+        specialty_options_ja,
+        default=[]
+    )
+    # 日本語→英語に逆変換
+    specialty_filters = []
+    for sp_ja in specialty_selected_ja:
+        sp_en = next((en for en, ja in SPECIALTY_JA.items() if ja == sp_ja), sp_ja)
+        specialty_filters.append(sp_en)
+
+    # 3.27のビルドのみ表示
+    patch_327_only = st.sidebar.checkbox("3.27のビルドのみ表示", value=False)
+
+    return (
+        class_filter,
+        ascendancy_filter,
+        source_filter,
+        translated_only,
+        combat_style_filter,
+        specialty_filters,
+        patch_327_only,
+    )
 
 
 def render_list_view():
@@ -225,10 +343,27 @@ def render_list_view():
     )
 
     # フィルタ取得
-    class_filter, ascendancy_filter, source_filter, translated_only = render_sidebar()
+    (
+        class_filter,
+        ascendancy_filter,
+        source_filter,
+        translated_only,
+        combat_style_filter,
+        specialty_filters,
+        patch_327_only,
+    ) = render_sidebar()
 
     # 検索実行
-    builds = search_builds(keyword, class_filter, ascendancy_filter, source_filter, translated_only)
+    builds = search_builds(
+        keyword,
+        class_filter,
+        ascendancy_filter,
+        source_filter,
+        translated_only,
+        combat_style_filter,
+        specialty_filters,
+        patch_327_only,
+    )
 
     if not builds:
         st.info("📭 該当するビルドが見つかりませんでした。フィルタを変更してみてください。")
@@ -255,6 +390,25 @@ def render_list_view():
                     badges.append(f"💰 {build['cost_tier']}")
                 if build["patch"]:
                     badges.append(f"📦 {build['patch']}")
+
+                # 新バッジ: 戦闘スタイル
+                try:
+                    if build["combat_style"]:
+                        combat_style_ja = COMBAT_STYLE_JA.get(build["combat_style"], build["combat_style"])
+                        badges.append(f"⚔️ {combat_style_ja}")
+                except (KeyError, IndexError):
+                    pass
+
+                # 新バッジ: 得意分野（1つ目のみ）
+                try:
+                    specialty_list = parse_json_field(build["specialty"])
+                    if specialty_list:
+                        first_specialty = specialty_list[0]
+                        specialty_ja = SPECIALTY_JA.get(first_specialty, first_specialty)
+                        badges.append(f"🎯 {specialty_ja}")
+                except (KeyError, IndexError):
+                    pass
+
                 st.caption(" | ".join(badges))
 
             with col2:
@@ -303,10 +457,48 @@ def render_detail_view():
     col1, col2 = st.columns(2)
     with col1:
         if build["patch"]:
-            st.write(f"**パッチ:** {build['patch']}")
+            st.write(f"**📦 パッチバージョン:** {build['patch']}")
     with col2:
         if build["cost_tier"]:
-            st.write(f"**コスト:** {build['cost_tier']}")
+            st.write(f"**💰 コスト:** {build['cost_tier']}")
+
+    # ========== 新セクション ==========
+    # 戦闘スタイル
+    try:
+        if build["combat_style"]:
+            st.subheader("🏷️ 戦闘スタイル")
+            combat_style_ja = COMBAT_STYLE_JA.get(build["combat_style"], build["combat_style"])
+            st.write(combat_style_ja)
+    except (KeyError, IndexError):
+        pass
+
+    # 得意分野
+    try:
+        specialty_list = parse_json_field(build["specialty"])
+        if specialty_list:
+            st.subheader("🎯 得意分野")
+            specialty_ja_list = [SPECIALTY_JA.get(sp, sp) for sp in specialty_list]
+            st.write(", ".join(specialty_ja_list))
+    except (KeyError, IndexError):
+        pass
+
+    # 長所・短所
+    try:
+        pros_cons = build.get("pros_cons_ja") or build.get("pros_cons_en")
+        if pros_cons:
+            st.subheader("✅ 長所 / ❌ 短所")
+            st.write(pros_cons)
+    except (KeyError, IndexError):
+        pass
+
+    # コア装備
+    try:
+        core_equipment = build.get("core_equipment_ja") or build.get("core_equipment_en")
+        if core_equipment:
+            st.subheader("🛡️ コア装備")
+            st.write(core_equipment)
+    except (KeyError, IndexError):
+        pass
 
     # ビルドタイプタグ
     build_types = parse_json_field(build["build_types"])
