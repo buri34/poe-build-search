@@ -484,7 +484,7 @@ def render_detail_view():
 
     # 長所・短所
     try:
-        pros_cons = build.get("pros_cons_ja") or build.get("pros_cons_en")
+        pros_cons = build["pros_cons_ja"] if build["pros_cons_ja"] else build["pros_cons_en"]
         if pros_cons:
             st.subheader("✅ 長所 / ❌ 短所")
             st.write(pros_cons)
@@ -493,7 +493,7 @@ def render_detail_view():
 
     # コア装備
     try:
-        core_equipment = build.get("core_equipment_ja") or build.get("core_equipment_en")
+        core_equipment = build["core_equipment_ja"] if build["core_equipment_ja"] else build["core_equipment_en"]
         if core_equipment:
             st.subheader("🛡️ コア装備")
             st.write(core_equipment)
