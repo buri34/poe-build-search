@@ -8,6 +8,7 @@ from scraper.base import (
     random_delay, save_cache, load_cache, save_builds_to_db,
     detect_combat_style, detect_specialty,
 )
+from scraper.llm_extractor import extract_build_info_via_llm
 
 BASE_URL = "https://mobalytics.gg/poe/builds"
 # ビルドカテゴリタブ
@@ -18,33 +19,6 @@ ALLOWED_PATCHES = {"3.27", "3.26"}
 # Apollo State等のゴミデータ検知パターン
 GARBAGE_PATTERNS = ["__typename", "NgfDocument", "apolloState", "__APOLLO_STATE__",
                     "__NEXT_DATA__", "graphql", '"edges":', '"node":', '"cursor":']
-
-
-def _contains_garbage(text: str) -> bool:
-    """テキストにApollo State等のゴミパターンが含まれているか判定"""
-    if not text:
-        return False
-    text_lower = text.lower()
-    for p in GARBAGE_PATTERNS:
-        if p.lower() in text_lower:
-            return True
-    # JSON構造比率が高すぎる場合もゴミと判定
-    json_chars = text.count('{') + text.count('}') + text.count('":')
-    if len(text) > 0 and json_chars / len(text) > 0.05:
-        return True
-    return False
-
-
-async def _get_content_text(page: Page) -> str:
-    """コンテンツ領域のテキストを取得（main→article→bodyの順にフォールバック）"""
-    for selector in ("main", "article", "body"):
-        try:
-            text = await page.inner_text(selector)
-            if text and len(text.strip()) > 100:
-                return text
-        except Exception:
-            continue
-    return ""
 
 
 def _normalize_build(raw: dict, tab: str) -> dict | None:
@@ -132,205 +106,47 @@ def _normalize_build(raw: dict, tab: str) -> dict | None:
 
 
 async def _scrape_detail_page(page: Page, build: dict) -> dict:
-    """ビルド詳細ページからPros/Cons, コア装備を抽出"""
+    """ビルド詳細ページからLLM抽出でデータを取得"""
     url = build["source_url"]
     print(f"    詳細ページ: {url}")
     try:
         await page.goto(url, timeout=60000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_load_state('domcontentloaded')
+        await page.wait_for_timeout(5000)
 
-        # コンテンツ領域のテキストを取得（main→article→bodyの順）
-        page_text = await _get_content_text(page)
+        # innerText取得（可視テキストのみ）
+        page_text = await page.inner_text("body")
 
-        # Strengths and Weaknesses セクションを抽出
-        pros_cons = await _extract_pros_cons(page, page_text)
-        if pros_cons:
-            build["pros_cons_en"] = pros_cons
+        # LLM抽出
+        llm_result = extract_build_info_via_llm(page_text, build["name_en"])
 
-        # コア装備を抽出
-        core_equipment = await _extract_core_equipment(page, page_text)
-        if core_equipment:
-            build["core_equipment_en"] = core_equipment
+        # 結果をbuild dictにマージ
+        if llm_result.get("description_en"):
+            build["description_en"] = llm_result["description_en"]
+        if llm_result.get("pros_cons_en"):
+            build["pros_cons_en"] = llm_result["pros_cons_en"]
+        if llm_result.get("core_equipment_en"):
+            build["core_equipment_en"] = llm_result["core_equipment_en"]
+        if llm_result.get("class_en") and not build.get("class_en"):
+            build["class_en"] = llm_result["class_en"]
+        if llm_result.get("ascendancy_en") and not build.get("ascendancy_en"):
+            build["ascendancy_en"] = llm_result["ascendancy_en"]
 
-        # description_enを強化（概要テキストを取得）
-        overview = await _extract_overview(page, page_text)
-        if overview and (not build["description_en"] or len(build["description_en"]) < len(overview)):
-            build["description_en"] = overview
-
-        # 戦闘スタイルをページ内容で再判定（より正確に）
+        # 戦闘スタイルをLLM結果で再判定
         skills_raw = json.loads(build["skills_en"]) if build["skills_en"] else []
         build["combat_style"] = detect_combat_style(
-            build["name_en"], skills_raw, page_text[:2000]
+            build["name_en"], skills_raw,
+            llm_result.get("description_en") or ""
         )
-
     except Exception as e:
         print(f"    詳細ページエラー({url}): {e}")
-
     return build
 
 
-async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
-    """Strengths/Weaknesses セクションを抽出（section > h2 + bulleted-list方式）"""
-    try:
-        # sectionタグ内のh2で "Strengths" を含むセクションを探す
-        saw_data = await page.evaluate("""() => {
-            const sections = document.querySelectorAll('section');
-            for (const s of sections) {
-                const h2 = s.querySelector('h2');
-                if (h2 && h2.textContent.includes('Strengths')) {
-                    const header = s.querySelector('header');
-                    const content = header ? header.nextElementSibling : null;
-                    if (!content) return null;
-
-                    const lists = content.querySelectorAll('div[style*="bulleted-list"]');
-                    let pros = [];
-                    let cons = [];
-                    for (const list of lists) {
-                        const style = list.getAttribute('style') || '';
-                        const isStrength = style.includes('check');
-                        const isWeakness = style.includes('cross');
-                        const spans = list.querySelectorAll('span[data-lexical-text="true"]');
-                        for (const span of spans) {
-                            const t = span.textContent.trim();
-                            if (t) {
-                                if (isStrength) pros.push(t);
-                                else if (isWeakness) cons.push(t);
-                            }
-                        }
-                    }
-                    return {pros: pros, cons: cons};
-                }
-            }
-            return null;
-        }""")
-
-        if saw_data and (saw_data.get("pros") or saw_data.get("cons")):
-            parts = []
-            if saw_data.get("pros"):
-                parts.append("Pros: " + "; ".join(saw_data["pros"]))
-            if saw_data.get("cons"):
-                parts.append("Cons: " + "; ".join(saw_data["cons"]))
-            return "\n".join(parts)
-
-        # フォールバック: コンテンツ領域テキストから抽出
-        content_text = await _get_content_text(page)
-        result_parts = []
-        text_lower = content_text.lower()
-        for label, keywords in [("Pros", ["strengths", "pros"]), ("Cons", ["weaknesses", "cons"])]:
-            for keyword in keywords:
-                idx = text_lower.find(keyword)
-                if idx >= 0:
-                    snippet = content_text[idx:idx+500]
-                    for delim in ["\n\n", "Equipment", "Passive", "Skills"]:
-                        end = snippet.find(delim, len(keyword))
-                        if end > 0:
-                            snippet = snippet[:end]
-                            break
-                    # ゴミパターンが含まれていたら破棄
-                    if _contains_garbage(snippet):
-                        continue
-                    result_parts.append(f"{label}: {snippet.strip()}")
-                    break
-
-        return "\n".join(result_parts) if result_parts else None
-    except Exception:
-        return None
 
 
-async def _extract_core_equipment(page: Page, page_text: str) -> str | None:
-    """コア装備・ジュエルリストを抽出（section > h2="Equipment" + img[alt]方式）"""
-    try:
-        # Equipmentセクション内のimg alt属性からアイテム名を取得
-        items = await page.evaluate("""() => {
-            const sections = document.querySelectorAll('section');
-            for (const s of sections) {
-                const h2 = s.querySelector('h2');
-                if (h2 && h2.textContent.trim() === 'Equipment') {
-                    const imgs = s.querySelectorAll('img[alt]');
-                    let names = [];
-                    let seen = new Set();
-                    for (const img of imgs) {
-                        const alt = img.alt.trim();
-                        if (alt && alt.length > 2 && !seen.has(alt)) {
-                            seen.add(alt);
-                            names.push(alt);
-                        }
-                    }
-                    return names;
-                }
-            }
-            return [];
-        }""")
-
-        if items:
-            result = ", ".join(items)
-            return None if _contains_garbage(result) else result
-
-        # フォールバック: data-tippy要素からアイテム名を取得
-        tippy_items = await page.evaluate("""() => {
-            const sections = document.querySelectorAll('section');
-            for (const s of sections) {
-                const h2 = s.querySelector('h2');
-                if (h2 && h2.textContent.trim() === 'Equipment') {
-                    const tippys = s.querySelectorAll('[data-tippy-delegate-id]');
-                    let names = [];
-                    let seen = new Set();
-                    for (const t of tippys) {
-                        const text = t.textContent.trim();
-                        if (text && text.length > 2 && text.length < 100 && !seen.has(text)) {
-                            seen.add(text);
-                            names.push(text);
-                        }
-                    }
-                    return names;
-                }
-            }
-            return [];
-        }""")
-
-        if tippy_items:
-            result = ", ".join(tippy_items)
-            return None if _contains_garbage(result) else result
-        return None
-    except Exception:
-        return None
 
 
-async def _extract_overview(page: Page, page_text: str) -> str | None:
-    """ビルド概要テキストを抽出（section > h2="Build Overview"方式）"""
-    try:
-        # sectionタグからBuild Overviewを取得
-        text = await page.evaluate("""() => {
-            const sections = document.querySelectorAll('section');
-            for (const s of sections) {
-                const h2 = s.querySelector('h2');
-                if (h2 && h2.textContent.includes('Build Overview')) {
-                    const header = s.querySelector('header');
-                    const content = header ? header.nextElementSibling : null;
-                    if (content) {
-                        return content.textContent.trim();
-                    }
-                }
-            }
-            return null;
-        }""")
-
-        if text and len(text) > 10:
-            return text[:1500]
-
-        # フォールバック: コンテンツ領域テキストから "overview" を探す
-        content_text = await _get_content_text(page)
-        text_lower = content_text.lower()
-        idx = text_lower.find("overview")
-        if idx >= 0:
-            snippet = content_text[idx:idx+1500].strip()
-            # ゴミパターンが含まれていたら破棄
-            if snippet and not _contains_garbage(snippet):
-                return snippet
-
-        return None
-    except Exception:
-        return None
 
 
 async def _intercept_graphql(page: Page, captured: list[dict]):
@@ -527,15 +343,49 @@ async def scrape_mobalytics(use_cache: bool = True) -> list[dict]:
         # Phase 2: 各ビルドの詳細ページにアクセスして追加情報を抽出
         print(f"\n詳細ページアクセス開始（{len(all_builds)}件）")
         for i, build in enumerate(all_builds):
-            try:
-                print(f"  [{i+1}/{len(all_builds)}] {build['name_en']}")
-                all_builds[i] = await _scrape_detail_page(page, build)
+            success = False
+            for attempt in range(2):  # 最大2回試行（初回+リトライ1回）
+                try:
+                    if attempt > 0:
+                        print(f"    → リトライ {attempt}回目")
+                    print(f"  [{i+1}/{len(all_builds)}] {build['name_en']}")
+                    all_builds[i] = await _scrape_detail_page(page, build)
+                    success = True
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        print(f"    詳細ページエラー: {e}")
+                    else:
+                        print(f"    詳細ページスキップ（リトライ失敗）: {e}")
+
+            if success:
                 await random_delay(2, 4)
-            except Exception as e:
-                print(f"  詳細ページスキップ: {e}")
 
         await browser.close()
 
     print(f"\nmobalytics: 合計 {len(all_builds)}件取得（3.27/3.26のみ）")
     save_cache("mobalytics", all_builds)
     return all_builds
+
+
+async def main():
+    """メインエントリポイント"""
+    import argparse
+    parser = argparse.ArgumentParser(description="mobalytics.gg スクレイパー")
+    parser.add_argument("--no-cache", action="store_true", help="キャッシュを使用しない")
+    parser.add_argument("--no-db", action="store_true", help="DB保存をスキップ")
+    args = parser.parse_args()
+
+    use_cache = not args.no_cache
+    builds = await scrape_mobalytics(use_cache=use_cache)
+
+    if not args.no_db:
+        print(f"\nデータベースに保存中...")
+        await save_builds_to_db(builds)
+        print(f"完了: {len(builds)}件保存")
+    else:
+        print(f"\n完了: {len(builds)}件取得（DB保存スキップ）")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

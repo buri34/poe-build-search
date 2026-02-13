@@ -448,6 +448,10 @@ def render_detail_view():
     with col3:
         st.metric("ソース", build["source"])
 
+    # 引用元リンク
+    if build["source_url"]:
+        st.markdown(f"🔗 [引用元ページ（{build['source']}）]({build['source_url']})")
+
     # メインスキル
     st.subheader("🎯 メインスキル")
     skills = display_skills(build)

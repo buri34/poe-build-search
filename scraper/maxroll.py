@@ -9,6 +9,7 @@ from scraper.base import (
     random_delay, save_cache, load_cache, save_builds_to_db,
     detect_combat_style, detect_specialty,
 )
+from scraper.llm_extractor import extract_build_info_via_llm
 
 BASE_URL = "https://maxroll.gg/poe/build-guides"
 # 対象パッチバージョン
@@ -155,7 +156,7 @@ async def _scrape_build_list(page: Page, max_pages: int = None) -> list[dict]:
 
         print(f"  一覧ページ {current_page} アクセス中: {url}")
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await random_delay(1.5, 3.0)
         except Exception as e:
             print(f"  ページ {current_page} アクセス失敗: {e}")
@@ -247,109 +248,6 @@ async def _check_next_page(page: Page) -> bool:
         return False
 
 
-async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
-    """Pros/Cons セクションを抽出（Summaryセクション + FAQ から生成）"""
-    try:
-        result_parts = []
-
-        # 方法1: Summaryセクションのbullet points（ビルドの長所）
-        # #summary-header は深いネスト内にあるためCSSの~セレクタでは到達できない
-        # JS evaluateで祖先から辿ってULを取得
-        summary_items = await page.evaluate("""
-            () => {
-                const header = document.getElementById('summary-header');
-                if (!header) return [];
-                let base = header.parentElement?.parentElement?.parentElement;
-                if (!base) return [];
-                let next = base.nextElementSibling;
-                if (next && next.tagName === 'UL') {
-                    return Array.from(next.querySelectorAll('li'))
-                        .map(li => li.textContent.trim())
-                        .filter(t => t.length > 0);
-                }
-                return [];
-            }
-        """)
-        if summary_items:
-            result_parts.append("Pros: " + "; ".join(summary_items))
-
-        # 方法2: FAQセクションから「避けるべきMap Mod」等を弱点として抽出
-        text_lower = page_text.lower()
-        avoid_idx = text_lower.find("map modifiers to avoid")
-        if avoid_idx >= 0:
-            snippet = page_text[avoid_idx:avoid_idx + 500]
-            # 次のFAQ質問またはセクションまで切り取る
-            for delimiter in ["What ", "How ", "When ", "Where ", "Why ", "Copy and Paste"]:
-                delim_idx = snippet.find(delimiter, 30)
-                if delim_idx > 0:
-                    snippet = snippet[:delim_idx]
-                    break
-            avoid_text = snippet.replace("Map Modifiers to Avoid?", "").strip()
-            if avoid_text and len(avoid_text) > 5:
-                result_parts.append(f"Cons: Vulnerable to map mods: {avoid_text}")
-
-        # 方法3: フォールバック — ページテキスト内の明示的なPros/Cons
-        if not result_parts:
-            for keyword_pair in [("pros", "cons"), ("strengths", "weaknesses")]:
-                pros_kw, cons_kw = keyword_pair
-                pros_idx = text_lower.find(pros_kw)
-                cons_idx = text_lower.find(cons_kw)
-                if pros_idx >= 0:
-                    end = cons_idx if cons_idx > pros_idx else pros_idx + 500
-                    snippet = page_text[pros_idx:min(end, pros_idx + 500)].strip()
-                    if snippet:
-                        result_parts.append(f"Pros: {snippet}")
-                if cons_idx >= 0:
-                    snippet = page_text[cons_idx:cons_idx + 500]
-                    for delimiter in ["Equipment", "Gear", "Passive", "Skills", "Leveling", "Build Overview"]:
-                        delim_idx = snippet.find(delimiter)
-                        if delim_idx > len(cons_kw):
-                            snippet = snippet[:delim_idx]
-                            break
-                    result_parts.append(f"Cons: {snippet.strip()}")
-                if result_parts:
-                    break
-
-        return "\n".join(result_parts) if result_parts else None
-    except Exception:
-        return None
-
-
-async def _extract_core_equipment(page: Page, page_text: str) -> str | None:
-    """コア装備（ユニークアイテム）を抽出"""
-    try:
-        equipment_items = []
-
-        # span.poe-item-unique からユニークアイテムを抽出
-        unique_spans = page.locator("span.poe-item-unique")
-        count = await unique_spans.count()
-        for i in range(min(count, 50)):
-            text = await unique_spans.nth(i).text_content()
-            if text and text.strip() and len(text.strip()) > 2:
-                equipment_items.append(text.strip())
-
-        # フォールバック: a[href]パターン
-        if not equipment_items:
-            item_links = page.locator('a[href*="/poe/items/"], a[href*="/poe/unique/"]')
-            link_count = await item_links.count()
-            for i in range(min(link_count, 30)):
-                text = await item_links.nth(i).text_content()
-                if text and text.strip() and len(text.strip()) > 2:
-                    equipment_items.append(text.strip())
-
-        # 重複排除
-        seen = set()
-        unique_items = []
-        for item in equipment_items:
-            # "x2"等のサフィックスを正規化
-            clean = re.sub(r'\s*x\d+$', '', item).strip()
-            if clean and clean not in seen:
-                seen.add(clean)
-                unique_items.append(clean)
-
-        return ", ".join(unique_items[:15]) if unique_items else None
-    except Exception:
-        return None
 
 
 async def _scrape_build_detail(page: Page, build_meta: dict) -> dict | None:
@@ -365,7 +263,8 @@ async def _scrape_build_detail(page: Page, build_meta: dict) -> dict | None:
 
     print(f"    詳細取得: {url}")
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(5000)
         await random_delay(1.0, 2.0)
     except Exception as e:
         print(f"    詳細ページアクセス失敗: {e}")
@@ -446,14 +345,11 @@ async def _scrape_build_detail(page: Page, build_meta: dict) -> dict | None:
         if not description:
             description = build_meta.get("post_excerpt") or ""
 
-        # ページ全文（Pros/Cons、装備抽出用）
-        page_text = await page.text_content("body") or ""
+        # ページ全文（LLM抽出用）
+        page_text = await page.inner_text("body") or ""
 
-        # Pros/Cons 抽出
-        pros_cons = await _extract_pros_cons(page, page_text)
-
-        # コア装備抽出
-        core_equipment = await _extract_core_equipment(page, page_text)
+        # LLM抽出
+        llm_result = extract_build_info_via_llm(page_text, build_name)
 
         # パッチバージョン（ページ内テキストから推定）
         patch = None
@@ -505,14 +401,21 @@ async def _scrape_build_detail(page: Page, build_meta: dict) -> dict | None:
             skill_info = f"Main skills: {', '.join(unique_skills[:5])}. "
             enhanced_desc = skill_info + description
 
+        # LLM抽出結果でフィールドを上書き
+        final_description = llm_result.get("description_en") or enhanced_desc
+        final_pros_cons = llm_result.get("pros_cons_en")
+        final_core_equipment = llm_result.get("core_equipment_en")
+        final_class = llm_result.get("class_en") if llm_result.get("class_en") and not class_name else class_name
+        final_ascendancy = llm_result.get("ascendancy_en") if llm_result.get("ascendancy_en") and not ascendancy else ascendancy
+
         return {
             "source_id": source_id,
             "source_url": url,
             "name_en": build_name,
-            "class_en": class_name,
-            "ascendancy_en": ascendancy,
+            "class_en": final_class,
+            "ascendancy_en": final_ascendancy,
             "skills_en": unique_skills,
-            "description_en": enhanced_desc,
+            "description_en": final_description,
             "patch": patch,
             "build_types": build_types,
             "author": author,
@@ -525,8 +428,8 @@ async def _scrape_build_detail(page: Page, build_meta: dict) -> dict | None:
             "cost_tier": cost_tier,
             "damage_types": damage_types,
             "combat_style": combat_style,
-            "pros_cons_en": pros_cons,
-            "core_equipment_en": core_equipment,
+            "pros_cons_en": final_pros_cons,
+            "core_equipment_en": final_core_equipment,
         }
 
     except Exception as e:
@@ -564,7 +467,20 @@ async def scrape_maxroll(use_cache: bool = True, test_mode: bool = False) -> lis
             # 各ビルドの詳細を取得（Pros/Cons、装備情報含む）
             for idx, build_meta in enumerate(build_list, 1):
                 print(f"  [{idx}/{len(build_list)}] ビルド詳細取得中...")
-                build_detail = await _scrape_build_detail(page, build_meta)
+                build_detail = None
+                for attempt in range(2):  # 最大2回試行（初回+リトライ1回）
+                    if attempt > 0:
+                        print(f"    → リトライ {attempt}回目")
+                    try:
+                        build_detail = await _scrape_build_detail(page, build_meta)
+                        if build_detail:
+                            break
+                    except Exception as e:
+                        if attempt == 0:
+                            print(f"    詳細取得エラー: {e}")
+                        else:
+                            print(f"    詳細取得スキップ（リトライ失敗）: {e}")
+
                 if build_detail:
                     normalized = _normalize_build(build_detail)
                     if normalized:
