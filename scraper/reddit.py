@@ -80,7 +80,6 @@ def _search_reddit(subreddit: str, query: str) -> list[dict]:
             "upvote_ratio": d.get("upvote_ratio", 0.5),
             "url": f"https://www.reddit.com{d.get('permalink', '')}",
             "created_utc": d.get("created_utc", 0),
-            "link_flair_text": d.get("link_flair_text", ""),
         })
     return posts
 
@@ -227,12 +226,6 @@ def scrape_reddit():
             print(f"  [{subreddit}] 検索: {query}")
             posts = _search_reddit(subreddit, query)
             for post in posts:
-                # r/pathofexile のみフレアフィルタを適用（"Build Guide"のみ）
-                if subreddit == "pathofexile":
-                    flair = post.get("link_flair_text", "").lower()
-                    if flair != "build guide":
-                        continue
-
                 if post["url"] not in seen_urls:
                     seen_urls.add(post["url"])
                     all_posts.append(post)
