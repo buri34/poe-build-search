@@ -267,7 +267,7 @@ def render_sidebar():
     # ソース選択
     source_filter = st.sidebar.selectbox(
         "ソースサイト",
-        ["全て", "mobalytics", "maxroll"],
+        ["全て", "mobalytics", "maxroll", "youtube"],
         index=0
     )
 
@@ -383,7 +383,11 @@ def render_list_view():
 
                 # バッジ
                 badges = []
-                badges.append(f"🌐 {build['source']}")
+                # ソース表示（YouTubeは専用アイコン）
+                if build['source'] == 'youtube':
+                    badges.append("▶️ YouTube")
+                else:
+                    badges.append(f"🌐 {build['source']}")
                 if build["favorites"]:
                     badges.append(f"⭐ {build['favorites']}")
                 if build["cost_tier"]:
@@ -450,7 +454,10 @@ def render_detail_view():
 
     # 引用元リンク
     if build["source_url"]:
-        st.markdown(f"🔗 [引用元ページ（{build['source']}）]({build['source_url']})")
+        if build["source"] == "youtube":
+            st.markdown(f"▶️ [YouTube動画を見る]({build['source_url']})")
+        else:
+            st.markdown(f"🔗 [引用元ページ（{build['source']}）]({build['source_url']})")
 
     # メインスキル
     st.subheader("🎯 メインスキル")
