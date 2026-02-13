@@ -101,11 +101,28 @@ def save_cache(source: str, data: list[dict]):
 
 
 async def save_builds_to_db(builds: list[dict]):
-    """スクレイピング結果をDBに保存"""
+    """スクレイピング結果をDBに保存（格納前バリデーション付き）"""
     import aiosqlite
     db = await aiosqlite.connect(settings.db_path)
     try:
+        saved_count = 0
+        skipped_count = 0
         for b in builds:
+            # バリデーション: データ品質チェック
+            skip_reason = []
+            desc = b.get("description_en") or ""
+            if not desc or len(desc) < 50:
+                skip_reason.append(f"description_en不足({len(desc)}文字)")
+            if not b.get("pros_cons_en"):
+                skip_reason.append("pros_cons_en空")
+            if not b.get("core_equipment_en"):
+                skip_reason.append("core_equipment_en空")
+
+            if skip_reason:
+                print(f"  [SKIP] {b.get('source_id', 'unknown')}: {', '.join(skip_reason)}")
+                skipped_count += 1
+                continue
+
             await db.execute(
                 """INSERT OR REPLACE INTO builds (
                     source, source_id, source_url,
@@ -128,7 +145,8 @@ async def save_builds_to_db(builds: list[dict]):
                 )""",
                 b,
             )
+            saved_count += 1
         await db.commit()
-        print(f"  DB保存完了: {len(builds)}件")
+        print(f"  DB保存完了: {saved_count}件 (スキップ: {skipped_count}件)")
     finally:
         await db.close()

@@ -248,36 +248,67 @@ async def _check_next_page(page: Page) -> bool:
 
 
 async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
-    """Pros/Cons セクションを抽出"""
+    """Pros/Cons セクションを抽出（Summaryセクション + FAQ から生成）"""
     try:
         result_parts = []
+
+        # 方法1: Summaryセクションのbullet points（ビルドの長所）
+        # #summary-header は深いネスト内にあるためCSSの~セレクタでは到達できない
+        # JS evaluateで祖先から辿ってULを取得
+        summary_items = await page.evaluate("""
+            () => {
+                const header = document.getElementById('summary-header');
+                if (!header) return [];
+                let base = header.parentElement?.parentElement?.parentElement;
+                if (!base) return [];
+                let next = base.nextElementSibling;
+                if (next && next.tagName === 'UL') {
+                    return Array.from(next.querySelectorAll('li'))
+                        .map(li => li.textContent.trim())
+                        .filter(t => t.length > 0);
+                }
+                return [];
+            }
+        """)
+        if summary_items:
+            result_parts.append("Pros: " + "; ".join(summary_items))
+
+        # 方法2: FAQセクションから「避けるべきMap Mod」等を弱点として抽出
         text_lower = page_text.lower()
+        avoid_idx = text_lower.find("map modifiers to avoid")
+        if avoid_idx >= 0:
+            snippet = page_text[avoid_idx:avoid_idx + 500]
+            # 次のFAQ質問またはセクションまで切り取る
+            for delimiter in ["What ", "How ", "When ", "Where ", "Why ", "Copy and Paste"]:
+                delim_idx = snippet.find(delimiter, 30)
+                if delim_idx > 0:
+                    snippet = snippet[:delim_idx]
+                    break
+            avoid_text = snippet.replace("Map Modifiers to Avoid?", "").strip()
+            if avoid_text and len(avoid_text) > 5:
+                result_parts.append(f"Cons: Vulnerable to map mods: {avoid_text}")
 
-        # "Pros" / "Pros and Cons" セクションを探す
-        for keyword_pair in [("pros", "cons"), ("strengths", "weaknesses")]:
-            pros_kw, cons_kw = keyword_pair
-            pros_idx = text_lower.find(pros_kw)
-            cons_idx = text_lower.find(cons_kw)
-
-            if pros_idx >= 0:
-                # Prosの範囲: キーワードからConsまで、またはセクション終端まで
-                end = cons_idx if cons_idx > pros_idx else pros_idx + 500
-                snippet = page_text[pros_idx:min(end, pros_idx + 500)].strip()
-                if snippet:
-                    result_parts.append(f"Pros: {snippet}")
-
-            if cons_idx >= 0:
-                # Consの範囲: キーワードから次のセクションまで
-                snippet = page_text[cons_idx:cons_idx + 500]
-                for delimiter in ["Equipment", "Gear", "Passive", "Skills", "Leveling", "Build Overview"]:
-                    delim_idx = snippet.find(delimiter)
-                    if delim_idx > len(cons_kw):
-                        snippet = snippet[:delim_idx]
-                        break
-                result_parts.append(f"Cons: {snippet.strip()}")
-
-            if result_parts:
-                break
+        # 方法3: フォールバック — ページテキスト内の明示的なPros/Cons
+        if not result_parts:
+            for keyword_pair in [("pros", "cons"), ("strengths", "weaknesses")]:
+                pros_kw, cons_kw = keyword_pair
+                pros_idx = text_lower.find(pros_kw)
+                cons_idx = text_lower.find(cons_kw)
+                if pros_idx >= 0:
+                    end = cons_idx if cons_idx > pros_idx else pros_idx + 500
+                    snippet = page_text[pros_idx:min(end, pros_idx + 500)].strip()
+                    if snippet:
+                        result_parts.append(f"Pros: {snippet}")
+                if cons_idx >= 0:
+                    snippet = page_text[cons_idx:cons_idx + 500]
+                    for delimiter in ["Equipment", "Gear", "Passive", "Skills", "Leveling", "Build Overview"]:
+                        delim_idx = snippet.find(delimiter)
+                        if delim_idx > len(cons_kw):
+                            snippet = snippet[:delim_idx]
+                            break
+                    result_parts.append(f"Cons: {snippet.strip()}")
+                if result_parts:
+                    break
 
         return "\n".join(result_parts) if result_parts else None
     except Exception:
@@ -285,40 +316,36 @@ async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
 
 
 async def _extract_core_equipment(page: Page, page_text: str) -> str | None:
-    """コア装備・ジュエルを抽出"""
+    """コア装備（ユニークアイテム）を抽出"""
     try:
         equipment_items = []
 
-        # ページ内のPoEアイテムリンクを探す
-        item_links = page.locator('a[href*="/poe/items/"], a[href*="/poe/unique/"], .poe-item')
-        count = await item_links.count()
-        for i in range(min(count, 30)):
-            text = await item_links.nth(i).text_content()
+        # span.poe-item-unique からユニークアイテムを抽出
+        unique_spans = page.locator("span.poe-item-unique")
+        count = await unique_spans.count()
+        for i in range(min(count, 50)):
+            text = await unique_spans.nth(i).text_content()
             if text and text.strip() and len(text.strip()) > 2:
                 equipment_items.append(text.strip())
 
-        # テキストからGear/Equipmentセクションのアイテムを探す
+        # フォールバック: a[href]パターン
         if not equipment_items:
-            text_lower = page_text.lower()
-            for section_kw in ["gear", "equipment", "items"]:
-                idx = text_lower.find(section_kw)
-                if idx >= 0:
-                    snippet = page_text[idx:idx + 2000]
-                    lines = snippet.split('\n')
-                    for line in lines[1:30]:
-                        line = line.strip()
-                        if line and 3 < len(line) < 80 and not line.lower().startswith(('gear', 'equipment', 'slot', 'type', 'item')):
-                            equipment_items.append(line)
-                    if equipment_items:
-                        break
+            item_links = page.locator('a[href*="/poe/items/"], a[href*="/poe/unique/"]')
+            link_count = await item_links.count()
+            for i in range(min(link_count, 30)):
+                text = await item_links.nth(i).text_content()
+                if text and text.strip() and len(text.strip()) > 2:
+                    equipment_items.append(text.strip())
 
         # 重複排除
         seen = set()
         unique_items = []
         for item in equipment_items:
-            if item not in seen:
-                seen.add(item)
-                unique_items.append(item)
+            # "x2"等のサフィックスを正規化
+            clean = re.sub(r'\s*x\d+$', '', item).strip()
+            if clean and clean not in seen:
+                seen.add(clean)
+                unique_items.append(clean)
 
         return ", ".join(unique_items[:15]) if unique_items else None
     except Exception:
@@ -379,13 +406,12 @@ async def _scrape_build_detail(page: Page, build_meta: dict) -> dict | None:
             }
             class_name = class_mapping.get(ascendancy, "")
 
-        # スキル（.poe-item 要素）
+        # スキル（.poe-item-gem 要素 — ジェムのみ取得）
         skills = []
-        skill_elements = page.locator(".poe-item")
+        skill_elements = page.locator("span.poe-item-gem")
         skill_count = await skill_elements.count()
-        for i in range(min(skill_count, 20)):
-            skill_el = skill_elements.nth(i)
-            skill_text = await skill_el.text_content()
+        for i in range(min(skill_count, 30)):
+            skill_text = await skill_elements.nth(i).text_content()
             if skill_text:
                 skills.append(skill_text.strip())
 
@@ -396,14 +422,29 @@ async def _scrape_build_detail(page: Page, build_meta: dict) -> dict | None:
                 seen_skills.add(s)
                 unique_skills.append(s)
 
-        # ビルド概要
-        description = build_meta.get("post_excerpt") or ""
+        # ビルド概要（記事冒頭の複数パラグラフを取得）
+        description = ""
+        intro_paragraphs = page.locator("article#main-article p")
+        p_count = await intro_paragraphs.count()
+        desc_parts = []
+        for i in range(min(p_count, 8)):
+            p_text = await intro_paragraphs.nth(i).text_content()
+            if not p_text:
+                continue
+            p_text = p_text.strip()
+            # 広告プレースホルダーやリンク集はスキップ
+            if not p_text or p_text.startswith("[") or len(p_text) < 20:
+                continue
+            # セクション切替（Resistances説明等）に達したら停止
+            if any(kw in p_text for kw in ["You do not need specific resistances", "If you're looking for an even more"]):
+                break
+            desc_parts.append(p_text)
+            if len(" ".join(desc_parts)) > 500:
+                break
+        description = " ".join(desc_parts)[:800] if desc_parts else ""
+        # post_excerptをフォールバック
         if not description:
-            first_p = page.locator("article p, .gutenbergBlock p").first
-            if await first_p.count() > 0:
-                p_text = await first_p.text_content()
-                if p_text:
-                    description = p_text.strip()[:500]
+            description = build_meta.get("post_excerpt") or ""
 
         # ページ全文（Pros/Cons、装備抽出用）
         page_text = await page.text_content("body") or ""

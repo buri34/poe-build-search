@@ -165,13 +165,17 @@ class ClaudeTranslator:
 
             print(f"🔄 翻訳中: ビルドID {build_id} - {row['name_en']}")
 
-            # 各フィールドを翻訳
-            name_ja = self.translate_text(row["name_en"], "ビルド名")
+            # 各フィールドを翻訳（空テキストスキップ機能付き）
+            name_ja = None
+            if row["name_en"] and len(row["name_en"].strip()) > 0:
+                name_ja = self.translate_text(row["name_en"], "ビルド名")
 
-            class_ja = self.translate_text(row["class_en"], "クラス名")
+            class_ja = None
+            if row["class_en"] and len(row["class_en"].strip()) > 0:
+                class_ja = self.translate_text(row["class_en"], "クラス名")
 
             ascendancy_ja = None
-            if row["ascendancy_en"]:
+            if row["ascendancy_en"] and len(row["ascendancy_en"].strip()) > 0:
                 ascendancy_ja = self.translate_text(row["ascendancy_en"], "アセンダンシー名")
 
             skills_ja = None
@@ -179,7 +183,7 @@ class ClaudeTranslator:
                 try:
                     skills_list = json.loads(row["skills_en"])
                     translated_skills = [
-                        self.translate_text(skill, "スキル名") for skill in skills_list
+                        self.translate_text(skill, "スキル名") for skill in skills_list if skill and len(skill.strip()) > 0
                     ]
                     skills_ja = json.dumps(translated_skills, ensure_ascii=False)
                 except json.JSONDecodeError:
@@ -187,16 +191,25 @@ class ClaudeTranslator:
                     skills_ja = row["skills_en"]  # そのまま保存
 
             description_ja = None
-            if row["description_en"]:
-                description_ja = self.translate_text(row["description_en"], "ビルド説明文")
+            desc = row["description_en"] or ""
+            if desc and len(desc.strip()) >= 50:
+                description_ja = self.translate_text(desc, "ビルド説明文")
+            else:
+                print(f"⚠️  description_en が不足 ({len(desc)}文字) - 翻訳スキップ")
 
             pros_cons_ja = None
-            if row["pros_cons_en"]:
-                pros_cons_ja = self.translate_text(row["pros_cons_en"], "ビルドの長所と短所(Pros/Cons)")
+            pc = row["pros_cons_en"] or ""
+            if pc and len(pc.strip()) > 0:
+                pros_cons_ja = self.translate_text(pc, "ビルドの長所と短所(Pros/Cons)")
+            else:
+                print(f"⚠️  pros_cons_en が空 - 翻訳スキップ")
 
             core_equipment_ja = None
-            if row["core_equipment_en"]:
-                core_equipment_ja = self.translate_text(row["core_equipment_en"], "ビルドのコア装備・ジュエル")
+            ce = row["core_equipment_en"] or ""
+            if ce and len(ce.strip()) > 0:
+                core_equipment_ja = self.translate_text(ce, "ビルドのコア装備・ジュエル")
+            else:
+                print(f"⚠️  core_equipment_en が空 - 翻訳スキップ")
 
             # DBに保存
             await db.execute(

@@ -108,7 +108,8 @@ async def _scrape_detail_page(page: Page, build: dict) -> dict:
         await page.goto(url, timeout=60000)
         await page.wait_for_timeout(3000)
 
-        page_text = await page.text_content("body") or ""
+        # inner_text = 可視テキストのみ（隠しJSON要素を除外）
+        page_text = await page.inner_text("body") or ""
 
         # Strengths and Weaknesses セクションを抽出
         pros_cons = await _extract_pros_cons(page, page_text)
@@ -138,48 +139,62 @@ async def _scrape_detail_page(page: Page, build: dict) -> dict:
 
 
 async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
-    """Strengths/Weaknesses セクションを抽出"""
+    """Strengths/Weaknesses セクションを抽出（section > h2 + bulleted-list方式）"""
     try:
-        # "Strengths" と "Weaknesses" を含むセクションを探す
+        # sectionタグ内のh2で "Strengths" を含むセクションを探す
+        saw_data = await page.evaluate("""() => {
+            const sections = document.querySelectorAll('section');
+            for (const s of sections) {
+                const h2 = s.querySelector('h2');
+                if (h2 && h2.textContent.includes('Strengths')) {
+                    const header = s.querySelector('header');
+                    const content = header ? header.nextElementSibling : null;
+                    if (!content) return null;
+
+                    const lists = content.querySelectorAll('div[style*="bulleted-list"]');
+                    let pros = [];
+                    let cons = [];
+                    for (const list of lists) {
+                        const style = list.getAttribute('style') || '';
+                        const isStrength = style.includes('check');
+                        const isWeakness = style.includes('cross');
+                        const spans = list.querySelectorAll('span[data-lexical-text="true"]');
+                        for (const span of spans) {
+                            const t = span.textContent.trim();
+                            if (t) {
+                                if (isStrength) pros.push(t);
+                                else if (isWeakness) cons.push(t);
+                            }
+                        }
+                    }
+                    return {pros: pros, cons: cons};
+                }
+            }
+            return null;
+        }""")
+
+        if saw_data and (saw_data.get("pros") or saw_data.get("cons")):
+            parts = []
+            if saw_data.get("pros"):
+                parts.append("Pros: " + "; ".join(saw_data["pros"]))
+            if saw_data.get("cons"):
+                parts.append("Cons: " + "; ".join(saw_data["cons"]))
+            return "\n".join(parts)
+
+        # フォールバック: page_textから抽出
         result_parts = []
-
-        # DOMから直接抽出を試みる
-        strengths_section = page.locator('text=Strengths').first
-        if await strengths_section.count() > 0:
-            # 親コンテナを取得してテキスト抽出
-            parent = strengths_section.locator("xpath=ancestor::div[contains(@class,'section') or contains(@class,'card') or contains(@class,'block')]").first
-            if await parent.count() > 0:
-                text = await parent.text_content() or ""
-                if text and len(text) > 10:
-                    result_parts.append(text.strip()[:1000])
-
-        # DOMから取れなかった場合、テキストパースにフォールバック
-        if not result_parts:
-            # "Strengths" と "Weaknesses" をテキストから抽出
-            text_lower = page_text.lower()
-            for keyword in ["strengths", "pros"]:
+        text_lower = page_text.lower()
+        for label, keywords in [("Pros", ["strengths", "pros"]), ("Cons", ["weaknesses", "cons"])]:
+            for keyword in keywords:
                 idx = text_lower.find(keyword)
                 if idx >= 0:
                     snippet = page_text[idx:idx+500]
-                    # 次のセクション区切りまで
-                    for delimiter in ["\n\n", "Weaknesses", "Equipment", "Passive", "Skills"]:
-                        end = snippet.find(delimiter, len(keyword))
+                    for delim in ["\n\n", "Equipment", "Passive", "Skills"]:
+                        end = snippet.find(delim, len(keyword))
                         if end > 0:
                             snippet = snippet[:end]
                             break
-                    result_parts.append(f"Strengths: {snippet.strip()}")
-                    break
-
-            for keyword in ["weaknesses", "cons"]:
-                idx = text_lower.find(keyword)
-                if idx >= 0:
-                    snippet = page_text[idx:idx+500]
-                    for delimiter in ["\n\n", "Equipment", "Passive", "Skills", "How it"]:
-                        end = snippet.find(delimiter, len(keyword))
-                        if end > 0:
-                            snippet = snippet[:end]
-                            break
-                    result_parts.append(f"Weaknesses: {snippet.strip()}")
+                    result_parts.append(f"{label}: {snippet.strip()}")
                     break
 
         return "\n".join(result_parts) if result_parts else None
@@ -188,84 +203,88 @@ async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
 
 
 async def _extract_core_equipment(page: Page, page_text: str) -> str | None:
-    """コア装備・ジュエルリストを抽出"""
+    """コア装備・ジュエルリストを抽出（section > h2="Equipment" + img[alt]方式）"""
     try:
-        equipment_items = []
+        # Equipmentセクション内のimg alt属性からアイテム名を取得
+        items = await page.evaluate("""() => {
+            const sections = document.querySelectorAll('section');
+            for (const s of sections) {
+                const h2 = s.querySelector('h2');
+                if (h2 && h2.textContent.trim() === 'Equipment') {
+                    const imgs = s.querySelectorAll('img[alt]');
+                    let names = [];
+                    let seen = new Set();
+                    for (const img of imgs) {
+                        const alt = img.alt.trim();
+                        if (alt && alt.length > 2 && !seen.has(alt)) {
+                            seen.add(alt);
+                            names.push(alt);
+                        }
+                    }
+                    return names;
+                }
+            }
+            return [];
+        }""")
 
-        # Equipmentセクションのアイテム名を抽出
-        equipment_section = page.locator('text=Equipment').first
-        if await equipment_section.count() > 0:
-            parent = equipment_section.locator("xpath=ancestor::section | ancestor::div[contains(@class,'section')]").first
-            if await parent.count() > 0:
-                # アイテム名リンクを取得
-                items = parent.locator('a[href*="/poe/item"], a[href*="/poe/unique"]')
-                count = await items.count()
-                for i in range(min(count, 20)):
-                    text = await items.nth(i).text_content()
-                    if text and text.strip():
-                        equipment_items.append(text.strip())
+        if items:
+            return ", ".join(items)
 
-        # ジュエルセクションも探す
-        jewel_section = page.locator('text=Jewels').first
-        if await jewel_section.count() > 0:
-            parent = jewel_section.locator("xpath=ancestor::section | ancestor::div[contains(@class,'section')]").first
-            if await parent.count() > 0:
-                items = parent.locator('a[href*="/poe/item"], a[href*="/poe/unique"], a[href*="/poe/jewel"]')
-                count = await items.count()
-                for i in range(min(count, 10)):
-                    text = await items.nth(i).text_content()
-                    if text and text.strip():
-                        equipment_items.append(text.strip())
+        # フォールバック: data-tippy要素からアイテム名を取得
+        tippy_items = await page.evaluate("""() => {
+            const sections = document.querySelectorAll('section');
+            for (const s of sections) {
+                const h2 = s.querySelector('h2');
+                if (h2 && h2.textContent.trim() === 'Equipment') {
+                    const tippys = s.querySelectorAll('[data-tippy-delegate-id]');
+                    let names = [];
+                    let seen = new Set();
+                    for (const t of tippys) {
+                        const text = t.textContent.trim();
+                        if (text && text.length > 2 && text.length < 100 && !seen.has(text)) {
+                            seen.add(text);
+                            names.push(text);
+                        }
+                    }
+                    return names;
+                }
+            }
+            return [];
+        }""")
 
-        # フォールバック: テキストからユニーク装備名を推定
-        if not equipment_items:
-            # PoE2の代表的なユニーク装備名パターンを探す
-            text_lower = page_text.lower()
-            equip_idx = text_lower.find("equipment")
-            if equip_idx >= 0:
-                snippet = page_text[equip_idx:equip_idx+2000]
-                # テキスト内のアイテム名を行単位で抽出
-                lines = snippet.split('\n')
-                for line in lines[1:30]:
-                    line = line.strip()
-                    if line and 3 < len(line) < 60 and not line.startswith(('Equipment', 'Slot', 'Type')):
-                        equipment_items.append(line)
-
-        # 重複排除
-        seen = set()
-        unique_items = []
-        for item in equipment_items:
-            if item not in seen:
-                seen.add(item)
-                unique_items.append(item)
-
-        return ", ".join(unique_items) if unique_items else None
+        return ", ".join(tippy_items) if tippy_items else None
     except Exception:
         return None
 
 
 async def _extract_overview(page: Page, page_text: str) -> str | None:
-    """ビルド概要テキストを抽出"""
+    """ビルド概要テキストを抽出（section > h2="Build Overview"方式）"""
     try:
-        # Build Overviewセクションを探す
-        overview_section = page.locator('text=Build Overview').first
-        if await overview_section.count() > 0:
-            # 次のセクションまでのテキストを取得
-            parent = overview_section.locator("xpath=ancestor::section | ancestor::div[contains(@class,'section') or contains(@class,'overview')]").first
-            if await parent.count() > 0:
-                text = await parent.text_content() or ""
-                # "Build Overview" の後のテキスト
-                idx = text.find("Build Overview")
-                if idx >= 0:
-                    text = text[idx + len("Build Overview"):].strip()
-                return text[:1500] if text else None
+        # sectionタグからBuild Overviewを取得
+        text = await page.evaluate("""() => {
+            const sections = document.querySelectorAll('section');
+            for (const s of sections) {
+                const h2 = s.querySelector('h2');
+                if (h2 && h2.textContent.includes('Build Overview')) {
+                    const header = s.querySelector('header');
+                    const content = header ? header.nextElementSibling : null;
+                    if (content) {
+                        return content.textContent.trim();
+                    }
+                }
+            }
+            return null;
+        }""")
 
-        # フォールバック: ページ先頭の説明文
+        if text and len(text) > 10:
+            return text[:1500]
+
+        # フォールバック: page_textから "overview" を探す
         text_lower = page_text.lower()
-        overview_idx = text_lower.find("overview")
-        if overview_idx >= 0:
-            snippet = page_text[overview_idx:overview_idx+1500]
-            return snippet.strip() if snippet.strip() else None
+        idx = text_lower.find("overview")
+        if idx >= 0:
+            snippet = page_text[idx:idx+1500].strip()
+            return snippet if snippet else None
 
         return None
     except Exception:
