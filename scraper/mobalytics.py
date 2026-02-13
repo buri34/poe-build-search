@@ -15,6 +15,37 @@ TABS = ["verified", "creator", "community"]
 # 対象パッチバージョン
 ALLOWED_PATCHES = {"3.27", "3.26"}
 
+# Apollo State等のゴミデータ検知パターン
+GARBAGE_PATTERNS = ["__typename", "NgfDocument", "apolloState", "__APOLLO_STATE__",
+                    "__NEXT_DATA__", "graphql", '"edges":', '"node":', '"cursor":']
+
+
+def _contains_garbage(text: str) -> bool:
+    """テキストにApollo State等のゴミパターンが含まれているか判定"""
+    if not text:
+        return False
+    text_lower = text.lower()
+    for p in GARBAGE_PATTERNS:
+        if p.lower() in text_lower:
+            return True
+    # JSON構造比率が高すぎる場合もゴミと判定
+    json_chars = text.count('{') + text.count('}') + text.count('":')
+    if len(text) > 0 and json_chars / len(text) > 0.05:
+        return True
+    return False
+
+
+async def _get_content_text(page: Page) -> str:
+    """コンテンツ領域のテキストを取得（main→article→bodyの順にフォールバック）"""
+    for selector in ("main", "article", "body"):
+        try:
+            text = await page.inner_text(selector)
+            if text and len(text.strip()) > 100:
+                return text
+        except Exception:
+            continue
+    return ""
+
 
 def _normalize_build(raw: dict, tab: str) -> dict | None:
     """GraphQLレスポンスからビルドデータを正規化"""
@@ -108,8 +139,8 @@ async def _scrape_detail_page(page: Page, build: dict) -> dict:
         await page.goto(url, timeout=60000)
         await page.wait_for_timeout(3000)
 
-        # inner_text = 可視テキストのみ（隠しJSON要素を除外）
-        page_text = await page.inner_text("body") or ""
+        # コンテンツ領域のテキストを取得（main→article→bodyの順）
+        page_text = await _get_content_text(page)
 
         # Strengths and Weaknesses セクションを抽出
         pros_cons = await _extract_pros_cons(page, page_text)
@@ -181,19 +212,23 @@ async def _extract_pros_cons(page: Page, page_text: str) -> str | None:
                 parts.append("Cons: " + "; ".join(saw_data["cons"]))
             return "\n".join(parts)
 
-        # フォールバック: page_textから抽出
+        # フォールバック: コンテンツ領域テキストから抽出
+        content_text = await _get_content_text(page)
         result_parts = []
-        text_lower = page_text.lower()
+        text_lower = content_text.lower()
         for label, keywords in [("Pros", ["strengths", "pros"]), ("Cons", ["weaknesses", "cons"])]:
             for keyword in keywords:
                 idx = text_lower.find(keyword)
                 if idx >= 0:
-                    snippet = page_text[idx:idx+500]
+                    snippet = content_text[idx:idx+500]
                     for delim in ["\n\n", "Equipment", "Passive", "Skills"]:
                         end = snippet.find(delim, len(keyword))
                         if end > 0:
                             snippet = snippet[:end]
                             break
+                    # ゴミパターンが含まれていたら破棄
+                    if _contains_garbage(snippet):
+                        continue
                     result_parts.append(f"{label}: {snippet.strip()}")
                     break
 
@@ -228,7 +263,8 @@ async def _extract_core_equipment(page: Page, page_text: str) -> str | None:
         }""")
 
         if items:
-            return ", ".join(items)
+            result = ", ".join(items)
+            return None if _contains_garbage(result) else result
 
         # フォールバック: data-tippy要素からアイテム名を取得
         tippy_items = await page.evaluate("""() => {
@@ -252,7 +288,10 @@ async def _extract_core_equipment(page: Page, page_text: str) -> str | None:
             return [];
         }""")
 
-        return ", ".join(tippy_items) if tippy_items else None
+        if tippy_items:
+            result = ", ".join(tippy_items)
+            return None if _contains_garbage(result) else result
+        return None
     except Exception:
         return None
 
@@ -279,12 +318,15 @@ async def _extract_overview(page: Page, page_text: str) -> str | None:
         if text and len(text) > 10:
             return text[:1500]
 
-        # フォールバック: page_textから "overview" を探す
-        text_lower = page_text.lower()
+        # フォールバック: コンテンツ領域テキストから "overview" を探す
+        content_text = await _get_content_text(page)
+        text_lower = content_text.lower()
         idx = text_lower.find("overview")
         if idx >= 0:
-            snippet = page_text[idx:idx+1500].strip()
-            return snippet if snippet else None
+            snippet = content_text[idx:idx+1500].strip()
+            # ゴミパターンが含まれていたら破棄
+            if snippet and not _contains_garbage(snippet):
+                return snippet
 
         return None
     except Exception:

@@ -2,6 +2,9 @@
 import json
 import random
 import asyncio
+import subprocess
+import os
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -34,6 +37,27 @@ SUMMONER_KEYWORDS = [
     "raise", "srs", "phantasm", "carrion", "herald of purity", "dominating blow",
     "absolution",
 ]
+
+
+# Layer 2: 形式バリデーション用パターン
+GARBAGE_PATTERNS = [
+    "__typename", "NgfDocument", "apolloState", "__APOLLO_STATE__",
+    "__NEXT_DATA__", "graphql", '"edges":', '"node":', '"cursor":',
+]
+
+
+def is_garbage_text(text: str) -> bool:
+    """JSONメタデータ・構造データが混入していないかチェック"""
+    if not text:
+        return True
+    text_lower = text.lower()
+    for pattern in GARBAGE_PATTERNS:
+        if pattern.lower() in text_lower:
+            return True
+    json_chars = text.count('{') + text.count('}') + text.count('":')
+    if len(text) > 0 and json_chars / len(text) > 0.05:
+        return True
+    return False
 
 
 def detect_combat_style(name: str, skills: list[str], description: str) -> str:
@@ -100,19 +124,101 @@ def save_cache(source: str, data: list[dict]):
     cache_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# Layer 3: 意味的バリデーション関数
+def validate_build_semantically(build: dict) -> dict:
+    """Claude CLIで各フィールドの内容が意味的に正しいか検証"""
+    prompt = f"""以下はPoE 1のビルドガイドから抽出したデータです。各フィールドが適切か判定してください。
+ビルド名: {build.get('name_en', '')}
+概要: {build.get('description_en', '')[:500]}
+長所短所: {build.get('pros_cons_en', '')[:500]}
+コア装備: {build.get('core_equipment_en', '')[:300]}
+
+判定基準:
+1. 概要はそのビルドの説明として意味をなすか？（JSONデータ、HTMLタグ、ナビゲーション文字列ではないか）
+2. 長所短所にはビルドのPros/Consが書かれているか？
+3. コア装備にはPoEの装備・アイテム名が含まれているか？
+
+回答: JSON形式のみ {{"valid": true/false, "issues": ["問題点"]}}"""
+
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith('CLAUDE')}
+    try:
+        result = subprocess.run(
+            ["claude", "--model", "sonnet", "-p", prompt],
+            capture_output=True, text=True, timeout=60,
+            env=clean_env,
+        )
+        # JSON抽出
+        match = re.search(r'\{.*\}', result.stdout, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    except Exception as e:
+        print(f"  意味的バリデーションエラー: {e}")
+    return {"valid": True, "issues": []}  # エラー時はパスさせる
+
+
+def regenerate_field(build: dict, field: str, page_text: str) -> str | None:
+    """Claude CLIでページ本文から該当フィールドを要約・再生成"""
+    field_prompts = {
+        "description_en": "Summarize this PoE build guide in 2-3 sentences. Focus on the main attack skill, synergies, and combat style (melee/ranged/caster).",
+        "pros_cons_en": "Extract the Pros and Cons of this PoE build. Format:\nPros:\n- ...\nCons:\n- ...",
+        "core_equipment_en": "List the core/required unique items and equipment for this PoE build. Just item names, comma-separated.",
+    }
+    prompt_text = field_prompts.get(field, "")
+    if not prompt_text or not page_text:
+        return None
+
+    full_prompt = f"{prompt_text}\n\nBuild guide text:\n{page_text[:3000]}"
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith('CLAUDE')}
+    try:
+        result = subprocess.run(
+            ["claude", "--model", "sonnet", "-p", full_prompt],
+            capture_output=True, text=True, timeout=60,
+            env=clean_env,
+        )
+        output = result.stdout.strip()
+        if output and len(output) > 20:
+            return output
+    except Exception:
+        pass
+    return None
+
+
 async def save_builds_to_db(builds: list[dict]):
-    """スクレイピング結果をDBに保存（格納前バリデーション付き）"""
+    """スクレイピング結果をDBに保存（3層バリデーション付き）"""
     import aiosqlite
     db = await aiosqlite.connect(settings.db_path)
     try:
         saved_count = 0
         skipped_count = 0
+        semantic_invalid_count = 0
+        semantic_issues_summary = []
+
         for b in builds:
-            # バリデーション: データ品質チェック
+            # Layer 1: 基本バリデーション（長さチェック）
             skip_reason = []
             desc = b.get("description_en") or ""
             if not desc or len(desc) < 50:
                 skip_reason.append(f"description_en不足({len(desc)}文字)")
+
+            pros_cons = b.get("pros_cons_en") or ""
+            core_eq = b.get("core_equipment_en") or ""
+
+            # Layer 2: 形式バリデーション（GARBAGE_PATTERNS検知）
+            if is_garbage_text(desc):
+                skip_reason.append("description_enにゴミデータ検出")
+                print(f"  [GARBAGE] {b.get('source_id', 'unknown')}: description_enがJSONメタデータ")
+                skipped_count += 1
+                continue
+
+            if is_garbage_text(pros_cons):
+                print(f"  [GARBAGE] {b.get('source_id', 'unknown')}: pros_cons_enをNULLにリセット")
+                b["pros_cons_en"] = None
+
+            if is_garbage_text(core_eq):
+                print(f"  [GARBAGE] {b.get('source_id', 'unknown')}: core_equipment_enをNULLにリセット")
+                b["core_equipment_en"] = None
+
+            # 必須フィールドの空チェック（Layer 2通過後）
             if not b.get("pros_cons_en"):
                 skip_reason.append("pros_cons_en空")
             if not b.get("core_equipment_en"):
@@ -120,6 +226,16 @@ async def save_builds_to_db(builds: list[dict]):
 
             if skip_reason:
                 print(f"  [SKIP] {b.get('source_id', 'unknown')}: {', '.join(skip_reason)}")
+                skipped_count += 1
+                continue
+
+            # Layer 3: 意味的バリデーション（Claude CLI LLMチェック）
+            validation_result = validate_build_semantically(b)
+            if not validation_result.get("valid", True):
+                issues = validation_result.get("issues", ["不明な問題"])
+                print(f"  [SEMANTIC] {b.get('source_id', 'unknown')}: 意味的バリデーション失敗 - {', '.join(issues)}")
+                semantic_invalid_count += 1
+                semantic_issues_summary.extend(issues)
                 skipped_count += 1
                 continue
 
@@ -147,6 +263,13 @@ async def save_builds_to_db(builds: list[dict]):
             )
             saved_count += 1
         await db.commit()
+
+        # Layer 3バリデーション結果のサマリー
+        if semantic_invalid_count > 0:
+            print(f"\n  [意味的バリデーション] 無効: {semantic_invalid_count}件")
+            unique_issues = list(set(semantic_issues_summary))
+            print(f"  主な問題点: {', '.join(unique_issues[:5])}")
+
         print(f"  DB保存完了: {saved_count}件 (スキップ: {skipped_count}件)")
     finally:
         await db.close()
