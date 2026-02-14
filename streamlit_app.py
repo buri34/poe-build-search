@@ -424,20 +424,18 @@ def render_list_view():
             col1, col2 = st.columns([4, 1])
 
             with col1:
-                # アイコン・サムネイル表示エリア
+                # アセンダンシーアイコン + タイトル（横並び）
                 ascendancy_icon_url = ASCENDANCY_ICON_URL.get(build["ascendancy_en"]) if build["ascendancy_en"] else None
-                youtube_thumbnail_url = get_youtube_thumbnail_url(build["source_url"]) if build["source"] == "youtube" else None
 
-                if ascendancy_icon_url or youtube_thumbnail_url:
-                    img_cols = st.columns([1, 1, 4])
-                    with img_cols[0]:
-                        if ascendancy_icon_url:
-                            st.image(ascendancy_icon_url, width=35)
-                    with img_cols[1]:
-                        if youtube_thumbnail_url:
-                            st.image(youtube_thumbnail_url, width=60)
+                if ascendancy_icon_url:
+                    title_cols = st.columns([1, 12])
+                    with title_cols[0]:
+                        st.image(ascendancy_icon_url, width=35)
+                    with title_cols[1]:
+                        st.subheader(display_build_name(build))
+                else:
+                    st.subheader(display_build_name(build))
 
-                st.subheader(display_build_name(build))
                 st.markdown(f"**{display_class_ascendancy(build)}**")
                 st.caption(f"スキル: {display_skills(build)}")
 
@@ -476,10 +474,21 @@ def render_list_view():
                 st.caption(" | ".join(badges))
 
             with col2:
+                # お気に入り数表示
+                if build["favorites"]:
+                    st.metric("⭐", build["favorites"])
+
+                # 詳細を見るボタン
                 if st.button("詳細を見る", key=f"detail_{build['id']}"):
                     st.session_state.view = "detail"
                     st.session_state.selected_build_id = build["id"]
                     st.rerun()
+
+                # YouTubeサムネイル（240px）
+                if build["source"] == "youtube":
+                    youtube_thumbnail_url = get_youtube_thumbnail_url(build["source_url"])
+                    if youtube_thumbnail_url:
+                        st.image(youtube_thumbnail_url, width=240)
 
             st.divider()
 
@@ -501,20 +510,23 @@ def render_detail_view():
         st.session_state.view = "list"
         st.rerun()
 
-    # アイコン・サムネイル表示エリア
+    # アセンダンシーアイコン + タイトル（横並び）
     ascendancy_icon_url = ASCENDANCY_ICON_URL.get(build["ascendancy_en"]) if build["ascendancy_en"] else None
-    youtube_thumbnail_url = get_youtube_thumbnail_url(build["source_url"]) if build["source"] == "youtube" else None
 
-    if ascendancy_icon_url or youtube_thumbnail_url:
-        img_cols = st.columns([1, 1, 4])
-        with img_cols[0]:
-            if ascendancy_icon_url:
-                st.image(ascendancy_icon_url, width=55)
-        with img_cols[1]:
-            if youtube_thumbnail_url:
-                st.image(youtube_thumbnail_url, width=120)
+    if ascendancy_icon_url:
+        title_cols = st.columns([1, 12])
+        with title_cols[0]:
+            st.image(ascendancy_icon_url, width=55)
+        with title_cols[1]:
+            st.title(display_build_name(build))
+    else:
+        st.title(display_build_name(build))
 
-    st.title(display_build_name(build))
+    # YouTubeサムネイル（480px、大きめ表示）
+    if build["source"] == "youtube":
+        youtube_thumbnail_url = get_youtube_thumbnail_url(build["source_url"])
+        if youtube_thumbnail_url:
+            st.image(youtube_thumbnail_url, width=480)
 
     # 基本情報
     col1, col2, col3 = st.columns(3)
