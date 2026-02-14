@@ -31,6 +31,35 @@ SEARCH_QUERIES = [
 MIN_DURATION_SECONDS = 300  # 5分
 MAX_AGE_DAYS = 180  # 6ヶ月
 
+# 複数ビルド動画検出パターン
+MULTI_BUILD_PATTERNS = [
+    r'\btop\s*\d+\b',
+    r'\b\d+\s*best\b',
+    r'\b\d+\s*builds?\b',
+    r'\btier\s*list\b',
+    r'\branking\b',
+    r'\ball\s*builds?\b',
+    r'\bbuilds?\s*to\s*play\b',
+    r'\bbest\s+\w*\s*starters\b',
+    r'\d+選',
+    r'ランキング',
+    r'\bevery\s*build\b',
+    r'\bbuild\s*tier\b',
+    r'\bcomparison\b',
+]
+
+
+def is_multi_build_video(title: str) -> tuple[bool, str | None]:
+    """タイトルから複数ビルド紹介動画を検出
+
+    Returns:
+        (is_multi, matched_pattern): 複数ビルド動画の場合True、マッチしたパターンを返す
+    """
+    for pattern in MULTI_BUILD_PATTERNS:
+        if re.search(pattern, title, re.IGNORECASE):
+            return True, pattern
+    return False, None
+
 
 def search_youtube_videos() -> list[dict]:
     """YouTube動画を検索し、重複排除・事前フィルタを適用"""
@@ -166,22 +195,27 @@ def score_and_filter_videos(videos: list[dict], top_n: int = 50) -> list[dict]:
     print("STEP 2: メタデータスコアリング + フィルタリング")
     print("=" * 60)
 
-    # 複数ビルド紹介動画を除外（Tier List, Top 10, Best Builds など）
-    exclude_keywords = [
-        "tier list", "top 10", "top 5", "top tier", "best builds",
-        "best starters", "best league", "ranking", "flowchart"
-    ]
-
+    # 正規表現パターンマッチによる複数ビルド動画の除外
     filtered_videos = []
     excluded_count = 0
+    excluded_logs = []
+
     for video in videos:
-        title_lower = video['title'].lower()
-        if any(kw in title_lower for kw in exclude_keywords):
+        is_multi, matched_pattern = is_multi_build_video(video['title'])
+        if is_multi:
             excluded_count += 1
+            excluded_logs.append({
+                'title': video['title'],
+                'pattern': matched_pattern
+            })
             continue
         filtered_videos.append(video)
 
     print(f"  除外: {excluded_count}件（複数ビルド紹介動画）")
+    if excluded_logs:
+        print(f"  除外例（最大5件）:")
+        for log in excluded_logs[:5]:
+            print(f"    - {log['title'][:50]}... (パターン: {log['pattern']})")
     print(f"  残り: {len(filtered_videos)}件")
 
     for video in filtered_videos:
@@ -226,17 +260,16 @@ async def get_video_transcript(video_id: str) -> str | None:
 
 async def extract_build_from_transcript(video: dict, transcript: str) -> dict | None:
     """字幕テキストからビルド情報をLLM抽出"""
-    # プロンプトに追加指示を含めて既存のLLM抽出を呼び出す
-    enhanced_prompt = f"""このテキストはYouTube動画の書き起こしです。
-フィラー（uh, um等）は無視し、ビルド情報のみ抽出してください。
-複数ビルド紹介時はメインビルドを抽出してください。
-
-{transcript}"""
-
-    # 既存のextract_build_info_via_llmを使用
-    result = extract_build_info_via_llm(enhanced_prompt, video['title'])
+    # YouTube専用のLLM抽出（VIDEO_TYPE判定を含む）
+    result = extract_build_info_via_llm(transcript, video['title'], source_type='youtube')
 
     if not result or not result.get('description_en'):
+        return None
+
+    # VIDEO_TYPE判定: multipleの場合はスキップ
+    video_type = result.get('video_type')
+    if video_type == 'multiple':
+        print(f"  ⚠️ VIDEO_TYPE=multiple 検出 - スキップ（複数ビルド紹介動画）")
         return None
 
     # ビルドデータ構築

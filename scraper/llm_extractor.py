@@ -45,6 +45,7 @@ def _parse_llm_output(output: str) -> dict:
         "core_equipment_en": None,
         "class_en": None,
         "ascendancy_en": None,
+        "video_type": None,  # YouTube専用: single/multiple
     }
     if not output:
         return result
@@ -115,15 +116,23 @@ def _parse_llm_output(output: str) -> dict:
         if asc_val and len(asc_val) < 50:
             result["ascendancy_en"] = asc_val
 
+    # VIDEO_TYPE 抽出（YouTube専用）
+    video_type_match = re.search(r'VIDEO_TYPE:\s*(.+)', output)
+    if video_type_match:
+        video_type_val = video_type_match.group(1).strip().lower()
+        if video_type_val in ['single', 'multiple']:
+            result["video_type"] = video_type_val
+
     return result
 
 
-def extract_build_info_via_llm(page_text: str, build_name: str) -> dict:
+def extract_build_info_via_llm(page_text: str, build_name: str, source_type: str = 'web') -> dict:
     """ページ全文からClaude CLIでビルド情報を抽出
 
     Args:
         page_text: ビルドガイドページのテキスト
         build_name: ビルド名（ログ用）
+        source_type: ソースタイプ（'web' または 'youtube'）
 
     Returns:
         抽出結果のdict（各フィールドはstr|None）
@@ -135,7 +144,50 @@ def extract_build_info_via_llm(page_text: str, build_name: str) -> dict:
     # 先頭8000文字に切り詰め
     truncated = page_text[:8000]
 
-    prompt = f"""以下はPath of Exile 1のビルドガイドページから取得したテキストです。
+    # YouTube用のプロンプト拡張
+    if source_type == 'youtube':
+        prompt = f"""以下はYouTube動画の書き起こしテキストです。
+このテキストからビルドガイドの情報を抽出してください。
+
+重要な注意:
+- フィラー（uh, um等）やYouTube特有の挨拶は無視してください
+- 通貨アイテム（Divine Orb, Chaos Orb, Exalted Orb等）はコア装備に含めないでください
+- この動画が1つのビルドの専用ガイドか、複数ビルドの紹介/比較/ランキングかを判定してください
+
+以下の形式で回答してください（英語で）:
+
+VIDEO_TYPE: single / multiple
+（この動画は1つのビルドの専用ガイドですか、複数ビルドの紹介/比較/ランキングですか？
+  動画タイトルとコメント内容から判断してください）
+
+DESCRIPTION:
+[ビルドの概要。メイン攻撃スキル、戦闘スタイル（melee/ranged/caster/summoner）、
+ 特徴的なシナジーや仕組みを2-3文で説明]
+
+PROS:
+- [長所1]
+- [長所2]
+- [長所3]
+(3-5個)
+
+CONS:
+- [短所1]
+- [短所2]
+- [短所3]
+(3-5個)
+
+CORE_EQUIPMENT:
+- [コア装備/ユニークアイテム/ジュエル1]
+- [コア装備/ユニークアイテム/ジュエル2]
+(主要な装備を3-8個。通貨アイテムは含めないこと)
+
+CLASS: [クラス名（英語）]
+ASCENDANCY: [アセンダンシー名（英語）]
+
+動画書き起こしテキスト:
+{truncated}"""
+    else:
+        prompt = f"""以下はPath of Exile 1のビルドガイドページから取得したテキストです。
 このテキストからビルドガイドの情報を抽出してください。
 
 重要な注意:
