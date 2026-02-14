@@ -357,9 +357,20 @@ async def scrape_youtube_builds():
             })
             # IPブロック対策: 失敗時バックオフ
             consecutive_failures += 1
-            if consecutive_failures >= 3:
+
+            # 連続失敗5回以上: 5分間一時停止
+            if consecutive_failures >= 5:
+                print(f"  ⏳ 連続失敗{consecutive_failures}回 - 5分間一時停止（IPブロック回避）")
+                await asyncio.sleep(300)
+            # 連続失敗3回以上: 120秒待機
+            elif consecutive_failures >= 3:
+                print(f"  ⏳ 連続失敗{consecutive_failures}回 - 120秒待機（IPブロック回避）")
+                await asyncio.sleep(120)
+            # 連続失敗2回: 60秒待機
+            elif consecutive_failures == 2:
                 print(f"  ⏳ 連続失敗{consecutive_failures}回 - 60秒待機（IPブロック回避）")
                 await asyncio.sleep(60)
+            # 連続失敗1回: 30秒待機
             else:
                 print(f"  ⏳ 連続失敗{consecutive_failures}回 - 30秒待機（IPブロック回避）")
                 await asyncio.sleep(30)
@@ -384,8 +395,8 @@ async def scrape_youtube_builds():
         print(f"  ✅ LLM抽出成功")
         builds.append(build)
 
-        # IPブロック対策: レート制限を12秒に拡大
-        await asyncio.sleep(12)
+        # IPブロック対策: レート制限を15秒に拡大（速度より確実性を優先）
+        await asyncio.sleep(15)
 
     # STEP 6: DB格納
     print("\n" + "=" * 60)
