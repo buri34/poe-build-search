@@ -2,6 +2,7 @@
 ⚔️ PoE ビルド検索 - Streamlit Webアプリ
 """
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -204,6 +205,36 @@ SPECIALTY_JA = {
     "all_rounder": "オールラウンダー",
 }
 
+# アセンダンシーアイコンURL（poedb.tw CDN）
+ASCENDANCY_ICON_URL = {
+    # Ranger系 (Dex)
+    "Warden": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconDex_Warden.webp",
+    "Deadeye": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconDex_Deadeye.webp",
+    "Pathfinder": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconDex_Pathfinder.webp",
+    # Shadow系 (DexInt)
+    "Assassin": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconDexInt_Assassin.webp",
+    "Trickster": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconDexInt_Trickster.webp",
+    "Saboteur": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconDexInt_Saboteur.webp",
+    # Witch系 (Int)
+    "Occultist": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconInt_Occultist.webp",
+    "Elementalist": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconInt_Elementalist.webp",
+    "Necromancer": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconInt_Necromancer.webp",
+    # Marauder系 (Str)
+    "Juggernaut": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStr_Juggernaut.webp",
+    "Berserker": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStr_Berserker.webp",
+    "Chieftain": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStr_Chieftain.webp",
+    # Duelist系 (StrDex)
+    "Slayer": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStrDex_Slayer.webp",
+    "Gladiator": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStrDex_Gladiator.webp",
+    "Champion": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStrDex_Champion.webp",
+    # Scion系 (StrDexInt)
+    "Ascendant": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStrDexInt_Ascendant.webp",
+    # Templar系 (StrInt)
+    "Inquisitor": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStrInt_Inquisitor.webp",
+    "Hierophant": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStrInt_Hierophant.webp",
+    "Guardian": "https://cdn.poedb.tw/image/Art/2DArt/UIImages/Common/IconStrInt_Guardian.webp",
+}
+
 
 # ========== ユーティリティ関数 ==========
 def parse_json_field(field_value: Optional[str]) -> list[str]:
@@ -214,6 +245,22 @@ def parse_json_field(field_value: Optional[str]) -> list[str]:
         return json.loads(field_value)
     except json.JSONDecodeError:
         return []
+
+
+def extract_youtube_video_id(url: Optional[str]) -> Optional[str]:
+    """YouTubeのURLから video_id を抽出"""
+    if not url:
+        return None
+    match = re.search(r'v=([a-zA-Z0-9_-]+)', url)
+    return match.group(1) if match else None
+
+
+def get_youtube_thumbnail_url(url: Optional[str]) -> Optional[str]:
+    """YouTubeのサムネイルURLを生成"""
+    video_id = extract_youtube_video_id(url)
+    if video_id:
+        return f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+    return None
 
 
 def display_build_name(build: sqlite3.Row) -> str:
@@ -377,6 +424,19 @@ def render_list_view():
             col1, col2 = st.columns([4, 1])
 
             with col1:
+                # アイコン・サムネイル表示エリア
+                ascendancy_icon_url = ASCENDANCY_ICON_URL.get(build["ascendancy_en"]) if build["ascendancy_en"] else None
+                youtube_thumbnail_url = get_youtube_thumbnail_url(build["source_url"]) if build["source"] == "youtube" else None
+
+                if ascendancy_icon_url or youtube_thumbnail_url:
+                    img_cols = st.columns([1, 1, 4])
+                    with img_cols[0]:
+                        if ascendancy_icon_url:
+                            st.image(ascendancy_icon_url, width=35)
+                    with img_cols[1]:
+                        if youtube_thumbnail_url:
+                            st.image(youtube_thumbnail_url, width=60)
+
                 st.subheader(display_build_name(build))
                 st.markdown(f"**{display_class_ascendancy(build)}**")
                 st.caption(f"スキル: {display_skills(build)}")
@@ -440,6 +500,19 @@ def render_detail_view():
     if st.button("← 一覧に戻る"):
         st.session_state.view = "list"
         st.rerun()
+
+    # アイコン・サムネイル表示エリア
+    ascendancy_icon_url = ASCENDANCY_ICON_URL.get(build["ascendancy_en"]) if build["ascendancy_en"] else None
+    youtube_thumbnail_url = get_youtube_thumbnail_url(build["source_url"]) if build["source"] == "youtube" else None
+
+    if ascendancy_icon_url or youtube_thumbnail_url:
+        img_cols = st.columns([1, 1, 4])
+        with img_cols[0]:
+            if ascendancy_icon_url:
+                st.image(ascendancy_icon_url, width=55)
+        with img_cols[1]:
+            if youtube_thumbnail_url:
+                st.image(youtube_thumbnail_url, width=120)
 
     st.title(display_build_name(build))
 
