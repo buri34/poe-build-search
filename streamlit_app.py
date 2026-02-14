@@ -288,6 +288,33 @@ def display_skills(build: sqlite3.Row) -> str:
     return "不明"
 
 
+def display_description_summary(build: sqlite3.Row, max_length: int = 150) -> Optional[str]:
+    """ビルド概要を切り詰めて表示（一覧用）"""
+    description = build["description_ja"] if build["description_ja"] else build["description_en"]
+    if not description:
+        return None
+    if len(description) > max_length:
+        return description[:max_length] + "..."
+    return description
+
+
+def display_skills_summary(build: sqlite3.Row, max_skills: int = 5) -> Optional[str]:
+    """スキル一覧を省略表示（一覧用）"""
+    skills_ja = parse_json_field(build["skills_ja"])
+    if not skills_ja:
+        skills_ja = parse_json_field(build["skills_en"])
+
+    if not skills_ja:
+        return None
+
+    if len(skills_ja) <= max_skills:
+        return ", ".join(skills_ja)
+    else:
+        displayed_skills = ", ".join(skills_ja[:max_skills])
+        remaining_count = len(skills_ja) - max_skills
+        return f"{displayed_skills} 他{remaining_count}件"
+
+
 # ========== 画面レンダリング ==========
 def render_sidebar():
     """サイドバー（フィルタ）"""
@@ -437,7 +464,16 @@ def render_list_view():
                     st.subheader(display_build_name(build))
 
                 st.markdown(f"**{display_class_ascendancy(build)}**")
-                st.caption(f"スキル: {display_skills(build)}")
+
+                # ビルド概要（赤枠の位置）
+                description_summary = display_description_summary(build)
+                if description_summary:
+                    st.caption(f"💬 {description_summary}")
+
+                # スキル一覧（黄枠の位置）
+                skills_summary = display_skills_summary(build)
+                if skills_summary:
+                    st.caption(f"🎯 {skills_summary}")
 
                 # バッジ
                 badges = []
